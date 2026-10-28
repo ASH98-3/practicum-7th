@@ -21,8 +21,7 @@ from app.auth import (current_user, end_session, hash_password, require_role, st
 from app.config import SEND_TO_COMPANY_THRESHOLD, USE_LLM
 from app.db import conn, init_db
 from app.embeddings.embedder import embedder_status
-from app.ingestion import jd_sources
-from app.ingestion.service import _slug, import_board, ingest_jd
+from app.ingestion.service import _slug, ingest_jd
 from app.parsing.document_reader import EmptyDocumentError, UnsupportedFileType, read_resume_file
 from app.pipeline.graph import build_graph
 from app.schemas.models import GraphState, ResumeData
@@ -112,16 +111,6 @@ class JDIn(BaseModel):
     text: str
 
 
-class UrlIn(BaseModel):
-    url: str
-
-
-class ImportIn(BaseModel):
-    source: Literal["greenhouse", "lever"]
-    board: str
-    limit: int = 15
-
-
 @app.get("/api/company/jds")
 def company_jds(user: dict = Depends(company_only)):
     return list_jds(user["company_id"])
@@ -133,26 +122,6 @@ def add_jd(body: JDIn, user: dict = Depends(company_only)):
         raise HTTPException(400, "JD text is too short to be useful (need at least ~100 characters).")
     jd = ingest_jd(user["company_name"], body.title.strip() or "Untitled role", body.text)
     return {"jd_id": jd.jd_id, "skills": jd.required_skills}
-
-
-@app.post("/api/company/jds/from-url")
-def add_from_url(body: UrlIn, user: dict = Depends(company_only)):
-    try:
-        job = jd_sources.fetch_url_jd(body.url)
-    except Exception as e:
-        raise HTTPException(400, f"Could not fetch that URL: {e}")
-    jd = ingest_jd(user["company_name"], job["title"] or "Untitled role", job["text"], job["url"])
-    return {"jd_id": jd.jd_id, "title": jd.title, "skills": jd.required_skills}
-
-
-@app.post("/api/company/jds/import")
-def import_jds(body: ImportIn, user: dict = Depends(company_only)):
-    """Imports your OWN company's board; every job is filed under your company name."""
-    try:
-        done = import_board(body.source, body.board.strip(), min(body.limit, 100), company=user["company_name"])
-    except Exception as e:
-        raise HTTPException(400, f"Import failed for {body.source}:{body.board} — {e}")
-    return {"imported": len(done)}
 
 
 @app.delete("/api/company/jds/{jd_id}")
@@ -205,7 +174,7 @@ def set_status(match_id: int, body: StatusIn, user: dict = Depends(company_only)
 def match(file: Optional[UploadFile] = File(None), text: str = Form(""), share: bool = Form(True),
           user: dict = Depends(candidate_only)):
     if collection_size() == 0:
-        raise HTTPException(400, "No jobs are registered yet. Ask a company to add some, or run seed_real_jds.py.")
+        raise HTTPException(400, "No jobs are registered yet. Ask a company to add some.")
     source = "pasted text"
     if file is not None and file.filename:
         with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix.lower()) as tmp:
