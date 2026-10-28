@@ -42,7 +42,7 @@ pre{white-space:pre-wrap;font:12px/1.4 ui-monospace,monospace;max-height:220px;o
   <label class="inl"><input type="checkbox" id="share" checked> Share my profile with companies I match well (score 60+)</label>
   <button class="go" id="mbtn" onclick="matchResume()">Find best-fit companies</button><div id="mmsg" class="msg"></div></div>
  <div id="result"></div>
- <div class="card"><h2>My match history &amp; status</h2><div id="history" class="mut">Loading…</div></div>
+ <div class="card"><h2>My match history & status</h2><div id="history" class="mut">Loading…</div></div>
 </section>
 
 <section id="comp" class="hide">
@@ -50,10 +50,9 @@ pre{white-space:pre-wrap;font:12px/1.4 ui-monospace,monospace;max-height:220px;o
  <div id="p-apps"><div id="apps"></div></div>
  <div id="p-jds" class="hide">
   <div class="card"><h2>Post a job</h2>
-   <div class="tabs"><button class="on" onclick="mode('paste',this)">Paste text</button><button onclick="mode('url',this)">From URL</button><button onclick="mode('import',this)">Import my job board</button></div>
-   <div id="m-paste"><input id="ptitle" placeholder="Job title"><textarea id="ptext" placeholder="Paste the full job description"></textarea><button class="go" onclick="pasteJd()">Add JD</button></div>
-   <div id="m-url" class="hide"><input id="uurl" placeholder="https://yourcompany.com/careers/job-123"><button class="go" onclick="fromUrl()">Fetch &amp; add</button></div>
-   <div id="m-import" class="hide"><div class="row"><select id="isrc"><option value="greenhouse">Greenhouse</option><option value="lever">Lever</option></select><input id="iboard" placeholder="your board token"><input id="ilimit" type="number" value="15" min="1" max="100"></div><button class="go" onclick="importBoard()">Import jobs</button></div>
+   <input id="ptitle" placeholder="Job title">
+   <textarea id="ptext" placeholder="Paste the full job description"></textarea>
+   <button class="go" onclick="pasteJd()">Add JD</button>
    <div id="cmsg" class="msg"></div></div>
   <div class="card"><h2>Your registered JDs</h2><table><thead><tr><th>Role</th><th>Skills found</th><th>Min exp</th><th></th></tr></thead><tbody id="jdrows"></tbody></table></div>
  </div>
@@ -61,7 +60,7 @@ pre{white-space:pre-wrap;font:12px/1.4 ui-monospace,monospace;max-height:220px;o
 </main>
 <script>
 const $=id=>document.getElementById(id);
-const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&','<':'<','>':'>','"':'"',"'":'&#39;'}[c]));
 const chips=a=>(a||[]).map(s=>`<span class="chip">${esc(s)}</span>`).join('');
 const LABEL={new:'Awaiting company review',shortlisted:'Shortlisted',rejected:'Not selected',not_sent:'Not sent (low fit or not shared)'};
 const fmt=t=>t?new Date(t).toLocaleString([], {dateStyle:'medium',timeStyle:'short'}):'';
@@ -118,19 +117,17 @@ async function loadApplicants(){try{const rows=await api('/api/company/applicant
  <div class="mut">${esc(a.rationale)}</div><details><summary class="mut">Resume text</summary><pre>${esc(a.resume_excerpt)}</pre></details>
  <div class="row" style="margin-top:10px;align-items:center"><div><span class="badge ${a.status}">${LABEL[a.status]}</span></div>
  <input type="datetime-local" id="at${a.id}" value="${esc(a.assessment_at||'')}" title="Assessment date/time">
- <button class="go" onclick="setStatus(${a.id},'shortlisted')">Shortlist &amp; schedule</button><button class="x" onclick="setStatus(${a.id},'rejected')">Reject</button></div></div>`).join('')
+ <button class="go" onclick="setStatus(${a.id},'shortlisted')">Shortlist & schedule</button><button class="x" onclick="setStatus(${a.id},'rejected')">Reject</button></div></div>`).join('')
  ||'<div class="card mut">No applicants yet. Candidates appear here when their resume matches one of your JDs with a score of 60+.</div>'}
  catch(e){expired(e)}}
 async function setStatus(id,st){try{await jpost('/api/company/applicants/'+id,{status:st,assessment_at:st==='shortlisted'?$('at'+id).value||null:null},'PATCH');loadApplicants()}catch(e){if(!expired(e))alert(e.message)}}
 async function loadJds(){try{const rows=await api('/api/company/jds');
- $('jdrows').innerHTML=rows.map(r=>`<tr><td>${r.url?`<a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.title)}</a>`:esc(r.title)}</td><td>${chips(r.required_skills.slice(0,8))}</td><td>${r.min_experience_years}y</td>
+ $('jdrows').innerHTML=rows.map(r=>`<tr><td>${esc(r.title)}</td><td>${chips(r.required_skills.slice(0,8))}</td><td>${r.min_experience_years}y</td>
  <td><button class="x" onclick="del('${esc(r.jd_id)}')">delete</button></td></tr>`).join('')||'<tr><td colspan=4 class="mut">No JDs yet — add one above.</td></tr>';status()}catch(e){expired(e)}}
 async function del(id){try{await api('/api/company/jds/'+id,{method:'DELETE'});loadJds()}catch(e){alert(e.message)}}
-function mode(m,b){for(const x of['paste','url','import'])$('m-'+x).classList.toggle('hide',x!==m);b.parentNode.querySelectorAll('button').forEach(e=>e.classList.toggle('on',e===b))}
-async function cpost(path,body,ok){const m=$('cmsg');m.className='msg';m.textContent='Working…';
- try{const d=await jpost(path,body);m.textContent=ok(d);loadJds()}catch(e){if(!expired(e)){m.className='msg err';m.textContent=e.message}}}
-const pasteJd=()=>cpost('/api/company/jds',{title:$('ptitle').value,text:$('ptext').value},d=>`Added. Skills detected: ${d.skills.join(', ')||'none'}.`);
-const fromUrl=()=>cpost('/api/company/jds/from-url',{url:$('uurl').value},d=>`Added “${d.title}”.`);
-const importBoard=()=>cpost('/api/company/jds/import',{source:$('isrc').value,board:$('iboard').value,limit:+$('ilimit').value},d=>`Imported ${d.imported} jobs.`);
+async function pasteJd(){const m=$('cmsg');m.className='msg';m.textContent='Working…';
+ try{const d=await jpost('/api/company/jds',{title:$('ptitle').value,text:$('ptext').value});
+  m.textContent=`Added. Skills detected: ${d.skills.join(', ')||'none'}.`;$('ptitle').value='';$('ptext').value='';loadJds()}
+ catch(e){if(!expired(e)){m.className='msg err';m.textContent=e.message}}}
 boot();
 </script></body></html>
