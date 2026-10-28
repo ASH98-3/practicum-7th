@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Talent Graph</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--fg:#1a1d23;--mut:#6b7280;--bd:#e3e6ea;--ac:#4f46e5;--ok:#16a34a;--wn:#d97706;--er:#dc2626}
+@media(prefers-color-scheme:dark){:root{--bg:#111318;--card:#1a1d24;--fg:#e8eaee;--mut:#9aa1ad;--bd:#2a2f38;--ac:#818cf8}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif}
+header{padding:14px 24px;border-bottom:1px solid var(--bd);display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+h1{font-size:18px;margin:0 8px 0 0}.pill{font-size:12px;padding:2px 10px;border-radius:99px;border:1px solid var(--bd);color:var(--mut)}.pill.bad{color:var(--wn);border-color:var(--wn)}
+#who{margin-left:auto;display:flex;gap:10px;align-items:center}
+main{max-width:980px;margin:24px auto;padding:0 16px}.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:18px;margin-bottom:16px}
+h2{font-size:15px;margin:0 0 12px}input,textarea,select{width:100%;padding:9px 11px;border:1px solid var(--bd);border-radius:8px;background:var(--bg);color:var(--fg);font:inherit;margin-bottom:8px}
+textarea{min-height:110px;resize:vertical}.row{display:flex;gap:8px;flex-wrap:wrap}.row>*{flex:1;min-width:150px}
+button.go{background:var(--ac);color:#fff;border:0;padding:9px 16px;border-radius:8px;cursor:pointer;font:inherit}button.go:disabled{opacity:.5}
+button.x{background:none;border:1px solid var(--bd);color:var(--er);cursor:pointer;padding:8px 12px;border-radius:8px;font:inherit}button.lnk{background:none;border:0;color:var(--ac);cursor:pointer;font:inherit}
+.msg{font-size:13px;margin-top:6px;color:var(--mut)}.msg.err{color:var(--er)}
+table{width:100%;border-collapse:collapse;font-size:14px}td,th{text-align:left;padding:8px 6px;border-bottom:1px solid var(--bd);vertical-align:top}th{color:var(--mut);font-weight:500}
+.tabs{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}.tabs button{background:var(--bg);border:1px solid var(--bd);color:var(--mut);padding:5px 14px;border-radius:99px;cursor:pointer;font:inherit}.tabs button.on{background:var(--ac);color:#fff;border-color:var(--ac)}
+.badge{display:inline-block;padding:2px 12px;border-radius:99px;color:#fff;font-weight:600;font-size:13px;background:var(--mut)}
+.shortlist,.shortlisted{background:var(--ok)}.manual_review,.new{background:var(--wn)}.reject,.rejected{background:var(--er)}
+.chip{display:inline-block;font-size:12px;padding:1px 8px;border-radius:6px;background:var(--bg);border:1px solid var(--bd);margin:2px 4px 2px 0}
+.match{margin-top:10px}.score{font-size:22px;font-weight:600}.mut{color:var(--mut);font-size:13px}a{color:var(--ac)}.hide{display:none}
+pre{white-space:pre-wrap;font:12px/1.4 ui-monospace,monospace;max-height:220px;overflow:auto;background:var(--bg);padding:8px;border-radius:8px}
+.auth{max-width:420px;margin:40px auto}label.inl{display:flex;gap:8px;align-items:center;font-size:14px;margin-bottom:10px}label.inl input{width:auto;margin:0}
+</style></head><body>
+<header><h1>Talent Graph</h1><span id="s-llm" class="pill"></span><span id="s-emb" class="pill"></span><span id="s-n" class="pill"></span>
+<div id="who" class="hide"><span id="whotxt" class="mut"></span><button class="x" onclick="logout()">Log out</button></div></header>
+<main>
+
+<section id="auth" class="hide"><div class="card auth">
+ <div class="tabs"><button id="t-login" class="on" onclick="authMode('login')">Log in</button><button id="t-reg" onclick="authMode('register')">Create account</button></div>
+ <div id="regonly" class="hide">
+  <select id="a-role" onchange="roleChange()"><option value="candidate">I'm a candidate</option><option value="company">I'm hiring (company account)</option></select>
+  <input id="a-name" placeholder="Your full name"><input id="a-comp" class="hide" placeholder="Company name"></div>
+ <input id="a-email" type="email" placeholder="Email" autocomplete="username"><input id="a-pw" type="password" placeholder="Password (8+ characters)" autocomplete="current-password">
+ <button class="go" id="a-btn" onclick="submitAuth()">Log in</button><div id="a-msg" class="msg"></div></div></section>
+
+<section id="cand" class="hide">
+ <div class="card"><h2>Match your resume</h2>
+  <input type="file" id="file" accept=".pdf,.docx,.txt">
+  <div class="mut" style="margin:-2px 0 8px">…or paste resume text:</div><textarea id="rtext" placeholder="Paste resume text (optional if a file is chosen)"></textarea>
+  <label class="inl"><input type="checkbox" id="share" checked> Share my profile with companies I match well (score 60+)</label>
+  <button class="go" id="mbtn" onclick="matchResume()">Find best-fit companies</button><div id="mmsg" class="msg"></div></div>
+ <div id="result"></div>
+ <div class="card"><h2>My match history &amp; status</h2><div id="history" class="mut">Loading…</div></div>
+</section>
+
+<section id="comp" class="hide">
+ <div class="tabs"><button id="c-apps" class="on" onclick="ctab('apps')">Applicants</button><button id="c-jds" onclick="ctab('jds')">My job descriptions</button></div>
+ <div id="p-apps"><div id="apps"></div></div>
+ <div id="p-jds" class="hide">
+  <div class="card"><h2>Post a job</h2>
+   <div class="tabs"><button class="on" onclick="mode('paste',this)">Paste text</button><button onclick="mode('url',this)">From URL</button><button onclick="mode('import',this)">Import my job board</button></div>
+   <div id="m-paste"><input id="ptitle" placeholder="Job title"><textarea id="ptext" placeholder="Paste the full job description"></textarea><button class="go" onclick="pasteJd()">Add JD</button></div>
+   <div id="m-url" class="hide"><input id="uurl" placeholder="https://yourcompany.com/careers/job-123"><button class="go" onclick="fromUrl()">Fetch &amp; add</button></div>
+   <div id="m-import" class="hide"><div class="row"><select id="isrc"><option value="greenhouse">Greenhouse</option><option value="lever">Lever</option></select><input id="iboard" placeholder="your board token"><input id="ilimit" type="number" value="15" min="1" max="100"></div><button class="go" onclick="importBoard()">Import jobs</button></div>
+   <div id="cmsg" class="msg"></div></div>
+  <div class="card"><h2>Your registered JDs</h2><table><thead><tr><th>Role</th><th>Skills found</th><th>Min exp</th><th></th></tr></thead><tbody id="jdrows"></tbody></table></div>
+ </div>
+</section>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const chips=a=>(a||[]).map(s=>`<span class="chip">${esc(s)}</span>`).join('');
+const LABEL={new:'Awaiting company review',shortlisted:'Shortlisted',rejected:'Not selected',not_sent:'Not sent (low fit or not shared)'};
+const fmt=t=>t?new Date(t).toLocaleString([], {dateStyle:'medium',timeStyle:'short'}):'';
+let me=null,authKind='login';
+async function api(path,opt){const r=await fetch(path,opt);const d=await r.json().catch(()=>({}));if(!r.ok){const e=new Error(d.detail||r.statusText);e.code=r.status;throw e}return d}
+const jpost=(p,b,m='POST')=>api(p,{method:m,headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
+
+async function status(){try{const s=await api('/api/status');
+ $('s-llm').textContent='LLM: '+s.llm;$('s-llm').className='pill'+(s.llm==='groq'?'':' bad');
+ $('s-emb').textContent='Embeddings: '+s.embedder;$('s-emb').className='pill'+(s.embedder==='fallback'?' bad':'');
+ $('s-n').textContent=s.jd_count+' JDs'}catch{}}
+async function boot(){status();try{me=await api('/api/auth/me')}catch{me=null}route()}
+function route(){for(const x of['auth','cand','comp'])$(x).classList.add('hide');$('who').classList.toggle('hide',!me);
+ if(!me){$('auth').classList.remove('hide');return}
+ $('whotxt').textContent=me.name+' · '+(me.role==='company'?me.company_name:'candidate');
+ if(me.role==='candidate'){$('cand').classList.remove('hide');loadHistory()}
+ else{$('comp').classList.remove('hide');ctab('apps')}}
+
+function authMode(m){authKind=m;$('t-login').classList.toggle('on',m==='login');$('t-reg').classList.toggle('on',m==='register');
+ $('regonly').classList.toggle('hide',m!=='register');$('a-btn').textContent=m==='login'?'Log in':'Create account';$('a-msg').textContent=''}
+function roleChange(){$('a-comp').classList.toggle('hide',$('a-role').value!=='company')}
+async function submitAuth(){const m=$('a-msg');m.className='msg';m.textContent='…';
+ try{me=authKind==='login'?await jpost('/api/auth/login',{email:$('a-email').value,password:$('a-pw').value})
+  :await jpost('/api/auth/register',{name:$('a-name').value,email:$('a-email').value,password:$('a-pw').value,role:$('a-role').value,company_name:$('a-comp').value});
+  $('a-pw').value='';m.textContent='';route()}catch(e){m.className='msg err';m.textContent=e.message}}
+async function logout(){await api('/api/auth/logout',{method:'POST'});me=null;$('result').innerHTML='';route()}
+function expired(e){if(e.code===401){me=null;route();return true}return false}
+
+/* candidate */
+async function matchResume(){const m=$('mmsg'),b=$('mbtn');m.className='msg';m.textContent='Parsing, embedding, matching…';b.disabled=true;
+ const fd=new FormData();if($('file').files[0])fd.append('file',$('file').files[0]);fd.append('text',$('rtext').value);fd.append('share',$('share').checked);
+ try{const d=await api('/api/candidate/match',{method:'POST',body:fd});m.textContent='';render(d);loadHistory();status()}
+ catch(e){if(!expired(e)){m.className='msg err';m.textContent=e.message}}b.disabled=false}
+function render(d){const p=d.profile,label={shortlist:'Strong fit found',manual_review:'Partial fit',reject:'No strong fit'}[d.decision];
+ $('result').innerHTML=`<div class="card"><span class="badge ${d.decision}">${label}</span>
+ <p class="mut">Extracted profile — ${p.experience_years} yrs experience · education: ${esc(p.education.join(', '))}</p>${chips(p.skills)}
+ <p class="mut">${d.shared?'Your profile was sent to companies scoring 60+. Track their response below.':'Sharing is off: nothing was sent to companies.'}</p></div>`+
+ d.matches.map((m,i)=>`<div class="card match"><div class="row" style="align-items:center"><div><b>#${i+1} ${esc(m.company)}</b>
+ <div>${m.url?`<a href="${esc(m.url)}" target="_blank" rel="noopener">${esc(m.title)}</a>`:esc(m.title)}</div></div>
+ <div style="text-align:right"><div class="score">${m.ats_score}</div><div class="mut">ATS · similarity ${m.similarity_score.toFixed(2)}</div></div></div>
+ <div class="mut" style="margin-top:6px">${esc(m.rationale)}</div></div>`).join('')}
+async function loadHistory(){try{const rows=await api('/api/candidate/matches');
+ $('history').innerHTML=rows.length?`<table><thead><tr><th>Company / role</th><th>ATS</th><th>Status</th></tr></thead><tbody>`+rows.map(r=>
+ `<tr><td><b>${esc(r.company)}</b><div class="mut">${esc(r.jd_title)}</div></td><td>${r.ats_score}</td><td><span class="badge ${r.status}">${LABEL[r.status]}</span>
+ ${r.status==='shortlisted'&&r.assessment_at?`<div class="mut">Assessment: <b>${esc(fmt(r.assessment_at))}</b></div>`:''}</td></tr>`).join('')+'</tbody></table>':'No matches yet — upload a resume above.'}
+ catch(e){expired(e)}}
+
+/* company */
+function ctab(t){for(const x of['apps','jds']){$('p-'+x).classList.toggle('hide',x!==t);$('c-'+x).classList.toggle('on',x===t)}t==='apps'?loadApplicants():loadJds()}
+async function loadApplicants(){try{const rows=await api('/api/company/applicants');
+ $('apps').innerHTML=rows.map(a=>`<div class="card"><div class="row" style="align-items:center"><div><b>${esc(a.candidate_name)}</b> <span class="mut">${esc(a.candidate_email)}</span>
+ <div class="mut">applied-by-match for ${esc(a.jd_title)}</div></div><div style="text-align:right"><div class="score">${a.ats_score}</div><div class="mut">ATS · sim ${a.similarity.toFixed(2)}</div></div></div>
+ <div style="margin-top:6px">${chips(a.profile.skills)}</div><div class="mut">${a.profile.experience_years} yrs · ${esc(a.profile.education.join(', '))}</div>
+ <div class="mut">${esc(a.rationale)}</div><details><summary class="mut">Resume text</summary><pre>${esc(a.resume_excerpt)}</pre></details>
+ <div class="row" style="margin-top:10px;align-items:center"><div><span class="badge ${a.status}">${LABEL[a.status]}</span></div>
+ <input type="datetime-local" id="at${a.id}" value="${esc(a.assessment_at||'')}" title="Assessment date/time">
+ <button class="go" onclick="setStatus(${a.id},'shortlisted')">Shortlist &amp; schedule</button><button class="x" onclick="setStatus(${a.id},'rejected')">Reject</button></div></div>`).join('')
+ ||'<div class="card mut">No applicants yet. Candidates appear here when their resume matches one of your JDs with a score of 60+.</div>'}
+ catch(e){expired(e)}}
+async function setStatus(id,st){try{await jpost('/api/company/applicants/'+id,{status:st,assessment_at:st==='shortlisted'?$('at'+id).value||null:null},'PATCH');loadApplicants()}catch(e){if(!expired(e))alert(e.message)}}
+async function loadJds(){try{const rows=await api('/api/company/jds');
+ $('jdrows').innerHTML=rows.map(r=>`<tr><td>${r.url?`<a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.title)}</a>`:esc(r.title)}</td><td>${chips(r.required_skills.slice(0,8))}</td><td>${r.min_experience_years}y</td>
+ <td><button class="x" onclick="del('${esc(r.jd_id)}')">delete</button></td></tr>`).join('')||'<tr><td colspan=4 class="mut">No JDs yet — add one above.</td></tr>';status()}catch(e){expired(e)}}
+async function del(id){try{await api('/api/company/jds/'+id,{method:'DELETE'});loadJds()}catch(e){alert(e.message)}}
+function mode(m,b){for(const x of['paste','url','import'])$('m-'+x).classList.toggle('hide',x!==m);b.parentNode.querySelectorAll('button').forEach(e=>e.classList.toggle('on',e===b))}
+async function cpost(path,body,ok){const m=$('cmsg');m.className='msg';m.textContent='Working…';
+ try{const d=await jpost(path,body);m.textContent=ok(d);loadJds()}catch(e){if(!expired(e)){m.className='msg err';m.textContent=e.message}}}
+const pasteJd=()=>cpost('/api/company/jds',{title:$('ptitle').value,text:$('ptext').value},d=>`Added. Skills detected: ${d.skills.join(', ')||'none'}.`);
+const fromUrl=()=>cpost('/api/company/jds/from-url',{url:$('uurl').value},d=>`Added “${d.title}”.`);
+const importBoard=()=>cpost('/api/company/jds/import',{source:$('isrc').value,board:$('iboard').value,limit:+$('ilimit').value},d=>`Imported ${d.imported} jobs.`);
+boot();
+</script></body></html>

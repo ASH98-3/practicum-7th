@@ -1,0 +1,6 @@
+Priya Sharma
+Software Engineer with 4 years of experience building backend services in Python
+and Go. Strong background in REST API design, PostgreSQL, and AWS (EC2, Lambda,
+S3). Led a team of 3 engineers on a payments microservice. Familiar with Docker,
+Kubernetes, and CI/CD pipelines (GitHub Actions). B.Tech in Computer Science from
+IIT Delhi (2020). Interested in backend / platform engineering roles.
