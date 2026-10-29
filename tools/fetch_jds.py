@@ -2,20 +2,24 @@
 Standalone job-description collector (NOT part of the live demo UI).
 
 Pulls public postings from Greenhouse / Lever job-board APIs, keeps only
-tech-relevant roles (software, data, full stack, web, mobile, AI/ML, etc.),
-and saves them to a JSON file for later import.
+tech-relevant roles, and saves FULL job description text into JSON.
+
+Each saved object looks like:
+  {
+    "company": "Stripe",
+    "title": "Backend Engineer",
+    "url": "https://...",
+    "text": "<full plain-text job description — this is the actual JD>",
+    "text_chars": 4821,
+    ...
+  }
+
+The importer (tools/import_collected_jds.py) uses the "text" field as the JD body.
 
 Usage:
     python tools/fetch_jds.py
     python tools/fetch_jds.py --per-board 10 --out data/collected_jds.json
     python tools/fetch_jds.py --only greenhouse
-    python tools/fetch_jds.py --no-filter          # keep all roles (not recommended)
-
-Notes:
-  - Uses official public board APIs (not LinkedIn/Indeed).
-  - Board tokens are the slug in boards.greenhouse.io/<token> or jobs.lever.co/<token>.
-  - Failed boards are skipped; one bad token does not stop the run.
-  - Output is append-friendly by JD id (re-runs update/skip duplicates).
 """
 from __future__ import annotations
 
@@ -26,13 +30,12 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Iterator, List
+from typing import Dict, Iterator, List, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 HEADERS = {"User-Agent": "TalentGraph-Collector/1.0 (student project; local research)"}
 
-# Prefer requests if installed; fall back to urllib (stdlib only).
 try:
     import requests
 
@@ -48,7 +51,6 @@ except ImportError:
         with urlopen(req, timeout=25) as resp:
             return _json.loads(resp.read().decode("utf-8", errors="replace"))
 
-# (source, board_token) — public careers boards. Edit freely.
 DEFAULT_BOARDS = [
     ("greenhouse", "stripe"),
     ("greenhouse", "airbnb"),
@@ -59,13 +61,11 @@ DEFAULT_BOARDS = [
     ("greenhouse", "discord"),
     ("greenhouse", "notion"),
     ("greenhouse", "roblox"),
-    ("greenhouse", "cloudkitchens"),
     ("lever", "spotify"),
     ("lever", "netflix"),
     ("lever", "plaid"),
 ]
 
-# Keep roles that match student-heavy fields: software, data, web, mobile, AI/ML, etc.
 TECH_TITLE_KEYWORDS = [
     r"software", r"developer", r"engineer", r"engineering",
     r"full\s*stack", r"fullstack", r"front\s*end", r"frontend", r"back\s*end", r"backend",
@@ -83,7 +83,6 @@ TECH_TITLE_KEYWORDS = [
     r"(software|engineer|developer|data|ml|ai).*intern",
 ]
 
-# Drop obvious non-tech roles even if title is ambiguous.
 EXCLUDE_TITLE_KEYWORDS = [
     r"sales", r"account\s*executive", r"account\s*manager", r"business\s*development",
     r"recruiter", r"talent\s*acquisition", r"people\s*partner", r"hr\b", r"human\s*resources",
@@ -93,20 +92,20 @@ EXCLUDE_TITLE_KEYWORDS = [
     r"customer\s*success", r"customer\s*support", r"customer\s*service",
     r"office\s*manager", r"executive\s*assistant", r"receptionist",
     r"nurse", r"physician", r"therapist", r"retail", r"store\s*manager",
+    r"abuse\s*investigator", r"trust\s*and\s*safety",
 ]
 
 _TECH_RE = re.compile("|".join(TECH_TITLE_KEYWORDS), re.I)
 _EXCLUDE_RE = re.compile("|".join(EXCLUDE_TITLE_KEYWORDS), re.I)
+MIN_JD_CHARS = 300
 
 
 def is_tech_role(title: str, text: str = "") -> bool:
-    """True if this looks like a software / data / AI / web / app role."""
     t = title or ""
     if _EXCLUDE_RE.search(t):
         return False
     if _TECH_RE.search(t):
         return True
-    # Weak fallback: tech terms in the first part of the body (helps odd titles).
     head = (text or "")[:1200]
     body_hits = re.search(
         r"python|javascript|typescript|react|node\.js|java\b|kotlin|swift|"
@@ -118,34 +117,76 @@ def is_tech_role(title: str, text: str = "") -> bool:
 
 
 def _strip_html(raw: str) -> str:
-    text = html.unescape(raw or "")
+    """Turn API HTML (sometimes double-escaped) into plain JD text."""
+    text = raw or ""
+    # Greenhouse often returns <p>...</p> — unescape until stable.
+    for _ in range(3):
+        un = html.unescape(text)
+        if un == text:
+            break
+        text = un
     text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", text)
     text = re.sub(r"(?i)<br\s*/?>", "\n", text)
-    text = re.sub(r"(?i)</p>", "\n", text)
-    text = re.sub(r"(?i)</li>", "\n", text)
+    text = re.sub(r"(?i)</(p|div|h[1-6]|li|tr)>", "\n", text)
+    text = re.sub(r"(?i)<li[^>]*>", "- ", text)
     text = re.sub(r"<[^>]+>", " ", text)
     text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n\s*\n+", "\n", text)
+    text = re.sub(r"\n\s*\n+", "\n\n", text)
     return text.strip()
+
+
+def _pack(company: str, title: str, url: str, text: str, source: str, board: str, external_id: str) -> Optional[dict]:
+    text = (text or "").strip()
+    if len(text) < MIN_JD_CHARS:
+        return None
+    return {
+        "source": source,
+        "board": board,
+        "company": company,
+        "title": title or "Untitled",
+        "url": url or "",
+        "text": text,  # FULL job description body used by the app
+        "text_chars": len(text),
+        "external_id": external_id,
+    }
+
+
+def _greenhouse_job_content(board: str, job_id: object) -> str:
+    """Fallback: fetch a single job when the list payload has empty content."""
+    try:
+        data = _get_json(
+            f"https://boards-api.greenhouse.io/v1/boards/{board}/jobs/{job_id}?questions=false"
+        )
+        if isinstance(data, dict):
+            return _strip_html(data.get("content") or "")
+    except Exception:
+        return ""
+    return ""
 
 
 def greenhouse_jobs(board: str, fetch_n: int) -> Iterator[dict]:
     url = f"https://boards-api.greenhouse.io/v1/boards/{board}/jobs?content=true"
     data = _get_json(url)
-    company = board.replace("-", " ").title()
+    company_fallback = board.replace("-", " ").title()
     for job in (data.get("jobs") or [])[:fetch_n]:
-        text = _strip_html(job.get("content") or "")
-        if len(text) < 200:
+        if not isinstance(job, dict):
             continue
-        yield {
-            "source": "greenhouse",
-            "board": board,
-            "company": company,
-            "title": job.get("title") or "Untitled",
-            "url": job.get("absolute_url") or "",
-            "text": text,
-            "external_id": f"greenhouse:{board}:{job.get('id')}",
-        }
+        company = (job.get("company_name") or company_fallback).strip()
+        title = job.get("title") or "Untitled"
+        text = _strip_html(job.get("content") or "")
+        if len(text) < MIN_JD_CHARS and job.get("id") is not None:
+            text = _greenhouse_job_content(board, job["id"]) or text
+        packed = _pack(
+            company=company,
+            title=title,
+            url=job.get("absolute_url") or "",
+            text=text,
+            source="greenhouse",
+            board=board,
+            external_id=f"greenhouse:{board}:{job.get('id')}",
+        )
+        if packed:
+            yield packed
 
 
 def lever_jobs(board: str, fetch_n: int) -> Iterator[dict]:
@@ -153,21 +194,28 @@ def lever_jobs(board: str, fetch_n: int) -> Iterator[dict]:
     data = _get_json(url)
     company = board.replace("-", " ").title()
     for p in (data or [])[:fetch_n]:
+        if not isinstance(p, dict):
+            continue
         text = p.get("descriptionPlain") or _strip_html(p.get("description") or "")
         for lst in p.get("lists") or []:
+            if not isinstance(lst, dict):
+                continue
             text += f"\n{lst.get('text', '')}\n{_strip_html(lst.get('content', ''))}"
-        text = text.strip()
-        if len(text) < 200:
-            continue
-        yield {
-            "source": "lever",
-            "board": board,
-            "company": company,
-            "title": p.get("text") or "Untitled",
-            "url": p.get("hostedUrl") or "",
-            "text": text,
-            "external_id": f"lever:{board}:{p.get('id')}",
-        }
+        # Lever categories sometimes hold extra structured sections
+        for cat in p.get("categories") or []:
+            if isinstance(cat, str):
+                text += f"\n{cat}"
+        packed = _pack(
+            company=company,
+            title=p.get("text") or "Untitled",
+            url=p.get("hostedUrl") or "",
+            text=text,
+            source="lever",
+            board=board,
+            external_id=f"lever:{board}:{p.get('id')}",
+        )
+        if packed:
+            yield packed
 
 
 SOURCES = {
@@ -191,15 +239,14 @@ def load_existing(path: Path) -> Dict[str, dict]:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Collect tech JDs into a JSON file")
+    ap = argparse.ArgumentParser(description="Collect tech JDs (full text) into a JSON file")
     ap.add_argument("--out", default="data/collected_jds.json", help="Output JSON path")
     ap.add_argument("--per-board", type=int, default=12, help="Max tech jobs to keep per board")
     ap.add_argument("--fetch-pool", type=int, default=60,
                     help="How many raw postings to pull per board before filtering")
     ap.add_argument("--only", choices=list(SOURCES), help="Only one source type")
     ap.add_argument("--delay", type=float, default=0.4, help="Seconds between boards")
-    ap.add_argument("--no-filter", action="store_true",
-                    help="Disable tech-role filter (keep all jobs)")
+    ap.add_argument("--no-filter", action="store_true", help="Disable tech-role filter")
     args = ap.parse_args()
 
     out_path = Path(args.out)
@@ -224,7 +271,7 @@ def main() -> int:
                 kept += 1
                 if kept >= args.per_board:
                     break
-            print(f"  ok   {source}:{board}  kept {kept}/{scanned} tech roles")
+            print(f"  ok   {source}:{board}  kept {kept}/{scanned} tech roles with full JD text")
             ok.append(f"{source}:{board}")
         except (HTTPError, URLError, Exception) as e:
             print(f"  skip {source}:{board}  ({type(e).__name__}: {str(e)[:80]})")
@@ -232,20 +279,37 @@ def main() -> int:
         time.sleep(args.delay)
 
     rows: List[dict] = sorted(by_id.values(), key=lambda r: (r.get("company", ""), r.get("title", "")))
-    # If filter is on, drop any old non-tech rows left from earlier runs.
     if not args.no_filter:
         before = len(rows)
-        rows = [r for r in rows if is_tech_role(r.get("title", ""), r.get("text", ""))]
+        rows = [
+            r for r in rows
+            if is_tech_role(r.get("title", ""), r.get("text", ""))
+            and len((r.get("text") or "").strip()) >= MIN_JD_CHARS
+        ]
         dropped = before - len(rows)
         if dropped:
-            print(f"  cleaned {dropped} non-tech rows from existing file")
+            print(f"  cleaned {dropped} non-tech / empty-body rows from existing file")
+
+    # Ensure text_chars is present for quick inspection in editors
+    for r in rows:
+        r["text_chars"] = len((r.get("text") or "").strip())
 
     out_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    print(f"\nSaved {len(rows)} tech jobs → {out_path}  (+{added} new this run)")
+    if rows:
+        avg = sum(r["text_chars"] for r in rows) // len(rows)
+        sample = rows[0]
+        print(f"\nSaved {len(rows)} jobs → {out_path}  (+{added} new)")
+        print(f"Average JD length: {avg} characters")
+        print(f"Sample: {sample.get('company')} — {sample.get('title')} ({sample.get('text_chars')} chars)")
+        print(f"  text starts: {str(sample.get('text', ''))[:160]!r}...")
+    else:
+        print(f"\nSaved 0 jobs → {out_path}")
+
     if failed:
         print(f"Skipped boards: {', '.join(failed)}")
-    print("Next: review the JSON, then run  python tools/import_collected_jds.py")
+    print("\nRemember: the full JD is in each object's \"text\" field (not only title/url).")
+    print("Import with:  python tools/import_collected_jds.py")
     return 0
 
 
