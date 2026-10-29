@@ -1,5 +1,10 @@
 __pycache__/
 *.pyc
 .env
+.venv/
+venv/
 data/chroma_db/*
 !data/chroma_db/.gitkeep
+data/app.db
+frontend/node_modules/
+frontend/dist/
