@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Literal, Optional
 
 from fastapi import Cookie, Depends, FastAPI, File, Form, HTTPException, Response, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -29,6 +30,18 @@ from app.vectorstore.company_store import collection_size, delete_jd, get_jd_by_
 
 init_db()
 app = FastAPI(title="Talent Graph")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 _graph = build_graph()
 company_only = require_role("company")
 candidate_only = require_role("candidate")
@@ -220,4 +233,5 @@ def my_matches(user: dict = Depends(candidate_only)):
     return [dict(r) for r in rows]
 
 
+# Legacy static UI still available at / when not using the React frontend
 app.mount("/", StaticFiles(directory=Path(__file__).parent.parent / "static", html=True), name="static")
