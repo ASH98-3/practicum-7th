@@ -14,6 +14,8 @@ During the live demo you can still:
   - log in as a company and paste a new JD
   - register a brand-new company in front of the panel
 """
+from typing import Optional
+
 from app.auth import hash_password
 from app.db import conn, init_db
 from app.ingestion.service import ingest_jd, _slug
@@ -104,7 +106,7 @@ You will ship features end-to-end across our clinical operations product.""",
 ]
 
 
-def upsert_user(email: str, name: str, role: str, company_name: str | None) -> None:
+def upsert_user(email: str, name: str, role: str, company_name: Optional[str]) -> None:
     email = email.strip().lower()
     company_id = _slug(company_name) if role == "company" and company_name else None
     with conn() as c:
