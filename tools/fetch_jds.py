@@ -1,17 +1,18 @@
 """
 Standalone job-description collector (NOT part of the live demo UI).
 
-Pulls public postings from Greenhouse / Lever job-board APIs and saves them
-to a JSON file. You can review/edit the file, then import into the app later
-with tools/import_collected_jds.py.
+Pulls public postings from Greenhouse / Lever job-board APIs, keeps only
+tech-relevant roles (software, data, full stack, web, mobile, AI/ML, etc.),
+and saves them to a JSON file for later import.
 
 Usage:
     python tools/fetch_jds.py
     python tools/fetch_jds.py --per-board 10 --out data/collected_jds.json
     python tools/fetch_jds.py --only greenhouse
+    python tools/fetch_jds.py --no-filter          # keep all roles (not recommended)
 
 Notes:
-  - Uses official public board APIs (not LinkedIn/Indeed — those block scrapers).
+  - Uses official public board APIs (not LinkedIn/Indeed).
   - Board tokens are the slug in boards.greenhouse.io/<token> or jobs.lever.co/<token>.
   - Failed boards are skipped; one bad token does not stop the run.
   - Output is append-friendly by JD id (re-runs update/skip duplicates).
@@ -29,6 +30,8 @@ from typing import Dict, Iterator, List
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+HEADERS = {"User-Agent": "TalentGraph-Collector/1.0 (student project; local research)"}
+
 # Prefer requests if installed; fall back to urllib (stdlib only).
 try:
     import requests
@@ -45,8 +48,6 @@ except ImportError:
         with urlopen(req, timeout=25) as resp:
             return _json.loads(resp.read().decode("utf-8", errors="replace"))
 
-HEADERS = {"User-Agent": "TalentGraph-Collector/1.0 (student project; local research)"}
-
 # (source, board_token) — public careers boards. Edit freely.
 DEFAULT_BOARDS = [
     ("greenhouse", "stripe"),
@@ -57,10 +58,63 @@ DEFAULT_BOARDS = [
     ("greenhouse", "figma"),
     ("greenhouse", "discord"),
     ("greenhouse", "notion"),
+    ("greenhouse", "roblox"),
+    ("greenhouse", "cloudkitchens"),
     ("lever", "spotify"),
     ("lever", "netflix"),
     ("lever", "plaid"),
 ]
+
+# Keep roles that match student-heavy fields: software, data, web, mobile, AI/ML, etc.
+TECH_TITLE_KEYWORDS = [
+    r"software", r"developer", r"engineer", r"engineering",
+    r"full\s*stack", r"fullstack", r"front\s*end", r"frontend", r"back\s*end", r"backend",
+    r"web\s*dev", r"web\s*engineer", r"application\s*dev", r"app\s*dev", r"mobile",
+    r"android", r"ios", r"react", r"node", r"python", r"java", r"golang", r"\bgo\b",
+    r"data\s*scien", r"data\s*engin", r"data\s*analy", r"analytics\s*engineer",
+    r"machine\s*learning", r"\bml\b", r"\bai\b", r"artificial\s*intelligence",
+    r"deep\s*learning", r"nlp", r"computer\s*vision", r"llm", r"gen\s*ai", r"generative",
+    r"devops", r"sre", r"site\s*reliability", r"platform\s*engineer", r"cloud\s*engineer",
+    r"infrastructure", r"security\s*engineer", r"cyber", r"qa\s*engineer", r"sdet",
+    r"test\s*engineer", r"automation\s*engineer", r"systems?\s*engineer",
+    r"database", r"\bsql\b", r"etl", r"analytics", r"bi\s*engineer",
+    r"research\s*engineer", r"applied\s*scientist", r"research\s*scientist",
+    r"intern.*(software|engineer|developer|data|ml|ai)",
+    r"(software|engineer|developer|data|ml|ai).*intern",
+]
+
+# Drop obvious non-tech roles even if title is ambiguous.
+EXCLUDE_TITLE_KEYWORDS = [
+    r"sales", r"account\s*executive", r"account\s*manager", r"business\s*development",
+    r"recruiter", r"talent\s*acquisition", r"people\s*partner", r"hr\b", r"human\s*resources",
+    r"marketing", r"brand", r"content\s*writer", r"copywriter", r"social\s*media",
+    r"legal", r"counsel", r"attorney", r"compliance\s*officer",
+    r"finance", r"accountant", r"controller", r"bookkeep",
+    r"customer\s*success", r"customer\s*support", r"customer\s*service",
+    r"office\s*manager", r"executive\s*assistant", r"receptionist",
+    r"nurse", r"physician", r"therapist", r"retail", r"store\s*manager",
+]
+
+_TECH_RE = re.compile("|".join(TECH_TITLE_KEYWORDS), re.I)
+_EXCLUDE_RE = re.compile("|".join(EXCLUDE_TITLE_KEYWORDS), re.I)
+
+
+def is_tech_role(title: str, text: str = "") -> bool:
+    """True if this looks like a software / data / AI / web / app role."""
+    t = title or ""
+    if _EXCLUDE_RE.search(t):
+        return False
+    if _TECH_RE.search(t):
+        return True
+    # Weak fallback: tech terms in the first part of the body (helps odd titles).
+    head = (text or "")[:1200]
+    body_hits = re.search(
+        r"python|javascript|typescript|react|node\.js|java\b|kotlin|swift|"
+        r"machine learning|deep learning|tensorflow|pytorch|sql|kubernetes|docker|aws|gcp|azure",
+        head,
+        re.I,
+    )
+    return bool(body_hits and re.search(r"engineer|developer|scientist|analyst", t, re.I))
 
 
 def _strip_html(raw: str) -> str:
@@ -75,11 +129,11 @@ def _strip_html(raw: str) -> str:
     return text.strip()
 
 
-def greenhouse_jobs(board: str, limit: int) -> Iterator[dict]:
+def greenhouse_jobs(board: str, fetch_n: int) -> Iterator[dict]:
     url = f"https://boards-api.greenhouse.io/v1/boards/{board}/jobs?content=true"
     data = _get_json(url)
     company = board.replace("-", " ").title()
-    for job in (data.get("jobs") or [])[:limit]:
+    for job in (data.get("jobs") or [])[:fetch_n]:
         text = _strip_html(job.get("content") or "")
         if len(text) < 200:
             continue
@@ -94,11 +148,11 @@ def greenhouse_jobs(board: str, limit: int) -> Iterator[dict]:
         }
 
 
-def lever_jobs(board: str, limit: int) -> Iterator[dict]:
+def lever_jobs(board: str, fetch_n: int) -> Iterator[dict]:
     url = f"https://api.lever.co/v0/postings/{board}?mode=json"
     data = _get_json(url)
     company = board.replace("-", " ").title()
-    for p in (data or [])[:limit]:
+    for p in (data or [])[:fetch_n]:
         text = p.get("descriptionPlain") or _strip_html(p.get("description") or "")
         for lst in p.get("lists") or []:
             text += f"\n{lst.get('text', '')}\n{_strip_html(lst.get('content', ''))}"
@@ -137,11 +191,15 @@ def load_existing(path: Path) -> Dict[str, dict]:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Collect public JDs into a JSON file")
+    ap = argparse.ArgumentParser(description="Collect tech JDs into a JSON file")
     ap.add_argument("--out", default="data/collected_jds.json", help="Output JSON path")
-    ap.add_argument("--per-board", type=int, default=8, help="Max jobs per board")
+    ap.add_argument("--per-board", type=int, default=12, help="Max tech jobs to keep per board")
+    ap.add_argument("--fetch-pool", type=int, default=60,
+                    help="How many raw postings to pull per board before filtering")
     ap.add_argument("--only", choices=list(SOURCES), help="Only one source type")
     ap.add_argument("--delay", type=float, default=0.4, help="Seconds between boards")
+    ap.add_argument("--no-filter", action="store_true",
+                    help="Disable tech-role filter (keep all jobs)")
     args = ap.parse_args()
 
     out_path = Path(args.out)
@@ -153,14 +211,20 @@ def main() -> int:
         if args.only and source != args.only:
             continue
         try:
-            n = 0
-            for job in SOURCES[source](board, args.per_board):
+            kept = 0
+            scanned = 0
+            for job in SOURCES[source](board, args.fetch_pool):
+                scanned += 1
+                if not args.no_filter and not is_tech_role(job["title"], job["text"]):
+                    continue
                 key = job["external_id"]
                 if key not in by_id:
                     added += 1
                 by_id[key] = job
-                n += 1
-            print(f"  ok   {source}:{board}  {n} jobs")
+                kept += 1
+                if kept >= args.per_board:
+                    break
+            print(f"  ok   {source}:{board}  kept {kept}/{scanned} tech roles")
             ok.append(f"{source}:{board}")
         except (HTTPError, URLError, Exception) as e:
             print(f"  skip {source}:{board}  ({type(e).__name__}: {str(e)[:80]})")
@@ -168,9 +232,17 @@ def main() -> int:
         time.sleep(args.delay)
 
     rows: List[dict] = sorted(by_id.values(), key=lambda r: (r.get("company", ""), r.get("title", "")))
+    # If filter is on, drop any old non-tech rows left from earlier runs.
+    if not args.no_filter:
+        before = len(rows)
+        rows = [r for r in rows if is_tech_role(r.get("title", ""), r.get("text", ""))]
+        dropped = before - len(rows)
+        if dropped:
+            print(f"  cleaned {dropped} non-tech rows from existing file")
+
     out_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    print(f"\nSaved {len(rows)} jobs → {out_path}  (+{added} new this run)")
+    print(f"\nSaved {len(rows)} tech jobs → {out_path}  (+{added} new this run)")
     if failed:
         print(f"Skipped boards: {', '.join(failed)}")
     print("Next: review the JSON, then run  python tools/import_collected_jds.py")
