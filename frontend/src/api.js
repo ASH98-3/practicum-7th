@@ -1,4 +1,5 @@
 const BASE = ''
+const DEFAULT_TIMEOUT_MS = 8000
 
 function formatDetail(detail) {
   if (!detail) return 'Request failed'
@@ -13,22 +14,39 @@ function formatDetail(detail) {
 }
 
 async function request(path, options = {}) {
-  const res = await fetch(`${BASE}${path}`, {
-    credentials: 'include',
-    ...options,
-  })
-  const data = await res.json().catch(() => ({}))
-  if (!res.ok) {
-    const err = new Error(formatDetail(data.detail) || res.statusText || 'Request failed')
-    err.status = res.status
-    throw err
+  const { timeout = DEFAULT_TIMEOUT_MS, ...fetchOptions } = options
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeout)
+
+  try {
+    const res = await fetch(`${BASE}${path}`, {
+      credentials: 'include',
+      signal: controller.signal,
+      ...fetchOptions,
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      const err = new Error(formatDetail(data.detail) || res.statusText || 'Request failed')
+      err.status = res.status
+      throw err
+    }
+    return data
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      throw new Error('Backend not responding. Is uvicorn running on port 8000?')
+    }
+    if (e instanceof TypeError) {
+      throw new Error('Cannot reach API. Start backend: uvicorn app.api:app --reload --host 127.0.0.1 --port 8000')
+    }
+    throw e
+  } finally {
+    clearTimeout(timer)
   }
-  return data
 }
 
 export const api = {
-  status: () => request('/api/status'),
-  me: () => request('/api/auth/me'),
+  status: () => request('/api/status', { timeout: 15000 }),
+  me: () => request('/api/auth/me', { timeout: 5000 }),
   login: (body) =>
     request('/api/auth/login', {
       method: 'POST',
@@ -44,7 +62,7 @@ export const api = {
   logout: () => request('/api/auth/logout', { method: 'POST' }),
 
   matchResume: (formData) =>
-    request('/api/candidate/match', { method: 'POST', body: formData }),
+    request('/api/candidate/match', { method: 'POST', body: formData, timeout: 180000 }),
   myMatches: () => request('/api/candidate/matches'),
 
   companyJds: () => request('/api/company/jds'),
@@ -53,6 +71,7 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      timeout: 120000,
     }),
   deleteJd: (id) => request(`/api/company/jds/${id}`, { method: 'DELETE' }),
   applicants: () => request('/api/company/applicants'),
