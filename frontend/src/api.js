@@ -1,5 +1,17 @@
 const BASE = ''
 
+function formatDetail(detail) {
+  if (!detail) return 'Request failed'
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) {
+    return detail
+      .map((d) => (typeof d === 'string' ? d : d.msg || JSON.stringify(d)))
+      .join('; ')
+  }
+  if (typeof detail === 'object' && detail.msg) return detail.msg
+  return String(detail)
+}
+
 async function request(path, options = {}) {
   const res = await fetch(`${BASE}${path}`, {
     credentials: 'include',
@@ -7,7 +19,7 @@ async function request(path, options = {}) {
   })
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {
-    const err = new Error(data.detail || res.statusText || 'Request failed')
+    const err = new Error(formatDetail(data.detail) || res.statusText || 'Request failed')
     err.status = res.status
     throw err
   }
