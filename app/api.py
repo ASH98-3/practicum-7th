@@ -1,4 +1,4 @@
-"""FastAPI backend.  Run:  uvicorn app.api:app --reload   ->  http://localhost:8000
+"""FastAPI backend.  Run:  uvicorn app.api:app --host 127.0.0.1 --port 8000
 
 Roles:
   company   - manages ONLY its own JDs, reviews applicants matched to them, shortlists/rejects + sets assessment time
@@ -42,6 +42,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Build graph once (does not load embedding weights until first match)
 _graph = build_graph()
 company_only = require_role("company")
 candidate_only = require_role("candidate")
@@ -114,8 +115,25 @@ def me(user: dict = Depends(current_user)):
 
 @app.get("/api/status")
 def status():
-    return {"llm": "groq" if USE_LLM else "offline-regex", "embedder": embedder_status(),
-            "jd_count": collection_size()}
+    try:
+        n = collection_size()
+    except Exception:
+        n = -1
+    return {
+        "llm": "groq" if USE_LLM else "offline-regex",
+        "embedder": embedder_status(),
+        "jd_count": n,
+        "ok": True,
+    }
+
+
+@app.get("/api/jobs")
+def public_jobs():
+    """All registered JDs (from scrape or company paste) for browsing."""
+    try:
+        return list_jds()
+    except Exception as e:
+        raise HTTPException(500, f"Could not list jobs: {e}")
 
 
 # ── company: JDs ────────────────────────────────────────────────────────────
@@ -187,7 +205,7 @@ def set_status(match_id: int, body: StatusIn, user: dict = Depends(company_only)
 def match(file: Optional[UploadFile] = File(None), text: str = Form(""), share: bool = Form(True),
           user: dict = Depends(candidate_only)):
     if collection_size() == 0:
-        raise HTTPException(400, "No jobs are registered yet. Ask a company to add some.")
+        raise HTTPException(400, "No jobs are registered yet. Run: python tools/load_scraped_jds.py")
     source = "pasted text"
     if file is not None and file.filename:
         with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix.lower()) as tmp:
