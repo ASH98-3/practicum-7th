@@ -7,6 +7,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import traceback
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -101,7 +102,10 @@ def login(body: LoginIn, response: Response):
 
 @app.post("/api/auth/logout")
 def logout(response: Response, session: Optional[str] = Cookie(None)):
-    end_session(response, session)
+    try:
+        end_session(response, session)
+    except Exception:
+        response.delete_cookie("session", path="/")
     return {"ok": True}
 
 
@@ -112,13 +116,20 @@ def me(user: dict = Depends(current_user)):
 
 @app.get("/api/status")
 def status():
+    # Keep this lightweight — never let vector-store issues take down the process.
+    n = 0
     try:
-        n = collection_size()
-    except Exception:
+        n = int(collection_size() or 0)
+    except Exception as e:
+        print(f"[status] jd_count unavailable: {type(e).__name__}: {e}")
         n = -1
+    try:
+        emb = embedder_status()
+    except Exception:
+        emb = "unknown"
     return {
         "llm": "groq" if USE_LLM else "offline-regex",
-        "embedder": embedder_status(),
+        "embedder": emb,
         "jd_count": n,
         "ok": True,
     }
@@ -127,9 +138,11 @@ def status():
 @app.get("/api/jobs")
 def public_jobs():
     try:
-        return list_jds()
+        return list_jds() or []
     except Exception as e:
-        raise HTTPException(500, f"Could not list jobs: {e}")
+        print(f"[jobs] list failed: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        return []  # empty list instead of 500 — UI stays up
 
 
 class JDIn(BaseModel):
@@ -139,7 +152,11 @@ class JDIn(BaseModel):
 
 @app.get("/api/company/jds")
 def company_jds(user: dict = Depends(company_only)):
-    return list_jds(user["company_id"])
+    try:
+        return list_jds(user["company_id"]) or []
+    except Exception as e:
+        print(f"[company/jds] {e}")
+        return []
 
 
 @app.post("/api/company/jds")
@@ -197,7 +214,11 @@ def set_status(match_id: int, body: StatusIn, user: dict = Depends(company_only)
 @app.post("/api/candidate/match")
 def match(file: Optional[UploadFile] = File(None), text: str = Form(""), share: bool = Form(True),
           user: dict = Depends(candidate_only)):
-    if collection_size() == 0:
+    try:
+        n = collection_size()
+    except Exception:
+        n = 0
+    if n == 0:
         raise HTTPException(400, "No jobs are registered yet. Run: python tools/load_scraped_jds.py")
     source = "pasted text"
     if file is not None and file.filename:
