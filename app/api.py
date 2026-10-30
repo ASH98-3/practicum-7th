@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app.auth import (current_user, end_session, hash_password, require_role, start_session, verify_password)
+from app.bootstrap import load_scraped_jds_if_empty
 from app.config import SEND_TO_COMPANY_THRESHOLD, USE_LLM
 from app.db import conn, init_db
 from app.embeddings.embedder import embedder_status
@@ -29,6 +30,12 @@ from app.schemas.models import GraphState, ResumeData
 from app.vectorstore.company_store import collection_size, delete_jd, get_jd_by_id, list_jds
 
 init_db()
+# If Chroma is empty, import tools/data/collected_jds.json automatically
+try:
+    load_scraped_jds_if_empty()
+except Exception as e:
+    print(f"[api] bootstrap skipped: {type(e).__name__}: {e}")
+
 app = FastAPI(title="Talent Graph")
 
 app.add_middleware(
@@ -42,13 +49,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Build graph once (does not load embedding weights until first match)
 _graph = build_graph()
 company_only = require_role("company")
 candidate_only = require_role("candidate")
 
 
-# ── auth ────────────────────────────────────────────────────────────────────
 class RegisterIn(BaseModel):
     name: str
     email: str
@@ -129,14 +134,12 @@ def status():
 
 @app.get("/api/jobs")
 def public_jobs():
-    """All registered JDs (from scrape or company paste) for browsing."""
     try:
         return list_jds()
     except Exception as e:
         raise HTTPException(500, f"Could not list jobs: {e}")
 
 
-# ── company: JDs ────────────────────────────────────────────────────────────
 class JDIn(BaseModel):
     title: str
     text: str
@@ -164,7 +167,6 @@ def remove_jd(jd_id: str, user: dict = Depends(company_only)):
     return {"deleted": jd_id}
 
 
-# ── company: applicants ───────────────────────────────────────────────────
 class StatusIn(BaseModel):
     status: Literal["new", "shortlisted", "rejected"]
     assessment_at: Optional[str] = None
@@ -200,12 +202,11 @@ def set_status(match_id: int, body: StatusIn, user: dict = Depends(company_only)
     return {"id": match_id, "status": body.status, "assessment_at": at}
 
 
-# ── candidate ───────────────────────────────────────────────────────────────
 @app.post("/api/candidate/match")
 def match(file: Optional[UploadFile] = File(None), text: str = Form(""), share: bool = Form(True),
           user: dict = Depends(candidate_only)):
     if collection_size() == 0:
-        raise HTTPException(400, "No jobs are registered yet. Run: python tools/load_scraped_jds.py")
+        raise HTTPException(400, "No jobs are registered yet.")
     source = "pasted text"
     if file is not None and file.filename:
         with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix.lower()) as tmp:
@@ -251,5 +252,4 @@ def my_matches(user: dict = Depends(candidate_only)):
     return [dict(r) for r in rows]
 
 
-# Legacy static UI still available at / when not using the React frontend
 app.mount("/", StaticFiles(directory=Path(__file__).parent.parent / "static", html=True), name="static")
