@@ -26,11 +26,11 @@ def _text(jd: JDData) -> str:
 
 def _meta(jd: JDData) -> dict:
     return {
-        "company_id": jd.company_id, "company": jd.company, "title": jd.title, "url": jd.url,
-        "required_skills": ",".join(jd.required_skills),
-        "min_experience_years": jd.min_experience_years,
-        "education_requirement": jd.education_requirement,
-        "parsed_summary": jd.parsed_summary,
+        "company_id": jd.company_id, "company": jd.company, "title": jd.title, "url": jd.url or "",
+        "required_skills": ",".join(jd.required_skills or []),
+        "min_experience_years": int(jd.min_experience_years or 0),
+        "education_requirement": jd.education_requirement or "",
+        "parsed_summary": jd.parsed_summary or "",
     }
 
 
@@ -47,27 +47,52 @@ def register_jds_bulk(jds: List[JDData]) -> None:
 
 
 def _to_jd(jd_id: str, meta: dict, doc: str) -> JDData:
+    meta = meta or {}
+    skills = meta.get("required_skills") or ""
     return JDData(
-        jd_id=jd_id, company_id=meta["company_id"], company=meta["company"],
-        title=meta.get("title", ""), url=meta.get("url", ""), raw_text=doc,
-        required_skills=[s for s in meta["required_skills"].split(",") if s],
-        min_experience_years=meta["min_experience_years"],
-        education_requirement=meta["education_requirement"],
-        parsed_summary=meta["parsed_summary"])
+        jd_id=jd_id, company_id=meta.get("company_id", ""), company=meta.get("company", ""),
+        title=meta.get("title", ""), url=meta.get("url", ""), raw_text=doc or "",
+        required_skills=[s for s in str(skills).split(",") if s],
+        min_experience_years=int(meta.get("min_experience_years") or 0),
+        education_requirement=meta.get("education_requirement") or "",
+        parsed_summary=meta.get("parsed_summary") or "")
 
 
 def get_jd_by_id(jd_id: str) -> Optional[JDData]:
     r = _get_collection().get(ids=[jd_id], include=["documents", "metadatas"])
-    return _to_jd(jd_id, r["metadatas"][0], r["documents"][0]) if r["ids"] else None
+    if not r or not r.get("ids"):
+        return None
+    return _to_jd(jd_id, (r.get("metadatas") or [None])[0], (r.get("documents") or [""])[0])
 
 
 def list_jds(company_id: Optional[str] = None) -> List[dict]:
-    kw = {"where": {"company_id": company_id}} if company_id else {}
-    r = _get_collection().get(include=["metadatas"], **kw)
-    rows = [{"jd_id": i, "company": m["company"], "title": m.get("title", ""), "url": m.get("url", ""),
-             "required_skills": [s for s in m["required_skills"].split(",") if s],
-             "min_experience_years": m["min_experience_years"]}
-            for i, m in zip(r["ids"], r["metadatas"])]
+    """List JD metadata. Safe on empty collections and partial metadata."""
+    try:
+        col = _get_collection()
+        if col.count() == 0:
+            return []
+        kwargs = {"include": ["metadatas"]}
+        if company_id:
+            kwargs["where"] = {"company_id": company_id}
+        r = col.get(**kwargs)
+    except Exception as e:
+        print(f"[company_store] list_jds failed: {type(e).__name__}: {e}")
+        return []
+
+    ids = r.get("ids") or []
+    metas = r.get("metadatas") or []
+    rows = []
+    for i, m in zip(ids, metas):
+        m = m or {}
+        skills = m.get("required_skills") or ""
+        rows.append({
+            "jd_id": i,
+            "company": m.get("company") or "",
+            "title": m.get("title") or "",
+            "url": m.get("url") or "",
+            "required_skills": [s for s in str(skills).split(",") if s],
+            "min_experience_years": int(m.get("min_experience_years") or 0),
+        })
     return sorted(rows, key=lambda x: (x["company"], x["title"]))
 
 
@@ -82,10 +107,24 @@ def query_top_jds(resume_embedding: List[float], top_k: int) -> List[MatchScore]
         return []
     r = c.query(query_embeddings=[resume_embedding], n_results=min(top_k, n),
                 include=["metadatas", "distances"])
-    return [MatchScore(jd_id=i, company_id=m["company_id"], company=m["company"], title=m.get("title", ""), url=m.get("url", ""),
-                       similarity_score=round(1.0 - d, 4))
-            for i, m, d in zip(r["ids"][0], r["metadatas"][0], r["distances"][0])]
+    ids = (r.get("ids") or [[]])[0]
+    metas = (r.get("metadatas") or [[]])[0]
+    dists = (r.get("distances") or [[]])[0]
+    return [
+        MatchScore(
+            jd_id=i,
+            company_id=(m or {}).get("company_id", ""),
+            company=(m or {}).get("company", ""),
+            title=(m or {}).get("title", ""),
+            url=(m or {}).get("url", ""),
+            similarity_score=round(1.0 - float(d), 4),
+        )
+        for i, m, d in zip(ids, metas, dists)
+    ]
 
 
 def collection_size() -> int:
-    return _get_collection().count()
+    try:
+        return _get_collection().count()
+    except Exception:
+        return 0
