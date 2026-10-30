@@ -1,8 +1,7 @@
-"""FastAPI backend.  Run:  uvicorn app.api:app --host 127.0.0.1 --port 8000
+"""FastAPI backend.  Run:  python -m uvicorn app.api:app --host 127.0.0.1 --port 8000
 
-Roles:
-  company   - manages ONLY its own JDs, reviews applicants matched to them, shortlists/rejects + sets assessment time
-  candidate - uploads a resume, sees ranked matches and the status each company gives them
+Load JDs first (manual):
+  python tools/load_scraped_jds.py
 """
 import json
 import os
@@ -19,7 +18,6 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app.auth import (current_user, end_session, hash_password, require_role, start_session, verify_password)
-from app.bootstrap import load_scraped_jds_if_empty
 from app.config import SEND_TO_COMPANY_THRESHOLD, USE_LLM
 from app.db import conn, init_db
 from app.embeddings.embedder import embedder_status
@@ -30,12 +28,6 @@ from app.schemas.models import GraphState, ResumeData
 from app.vectorstore.company_store import collection_size, delete_jd, get_jd_by_id, list_jds
 
 init_db()
-# If Chroma is empty, import tools/data/collected_jds.json automatically
-try:
-    load_scraped_jds_if_empty()
-except Exception as e:
-    print(f"[api] bootstrap skipped: {type(e).__name__}: {e}")
-
 app = FastAPI(title="Talent Graph")
 
 app.add_middleware(
@@ -206,7 +198,7 @@ def set_status(match_id: int, body: StatusIn, user: dict = Depends(company_only)
 def match(file: Optional[UploadFile] = File(None), text: str = Form(""), share: bool = Form(True),
           user: dict = Depends(candidate_only)):
     if collection_size() == 0:
-        raise HTTPException(400, "No jobs are registered yet.")
+        raise HTTPException(400, "No jobs are registered yet. Run: python tools/load_scraped_jds.py")
     source = "pasted text"
     if file is not None and file.filename:
         with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix.lower()) as tmp:
