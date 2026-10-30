@@ -36,7 +36,7 @@ async function request(path, options = {}) {
       throw new Error('Backend not responding. Is uvicorn running on port 8000?')
     }
     if (e instanceof TypeError) {
-      throw new Error('Cannot reach API. Start backend: uvicorn app.api:app --reload --host 127.0.0.1 --port 8000')
+      throw new Error('Cannot reach API. Start backend: uvicorn app.api:app --host 127.0.0.1 --port 8000')
     }
     throw e
   } finally {
@@ -47,6 +47,7 @@ async function request(path, options = {}) {
 export const api = {
   status: () => request('/api/status', { timeout: 15000 }),
   me: () => request('/api/auth/me', { timeout: 5000 }),
+  publicJobs: () => request('/api/jobs', { timeout: 10000 }),
   login: (body) =>
     request('/api/auth/login', {
       method: 'POST',
