@@ -76,4 +76,9 @@ def build_embedding_text(title: str, skills: List[str], body: str) -> str:
 
 
 def embedder_status() -> str:
-    return "fallback" if _get_model() is None else "sentence-transformers"
+    """Report status without forcing a model download (keeps /api/status fast)."""
+    if _model_load_failed:
+        return "fallback"
+    if _model is None:
+        return "ready (loads on first match)"
+    return "sentence-transformers"
