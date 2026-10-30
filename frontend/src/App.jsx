@@ -8,30 +8,42 @@ export default function App() {
   const [user, setUser] = useState(null)
   const [status, setStatus] = useState(null)
   const [booting, setBooting] = useState(true)
+  const [bootError, setBootError] = useState('')
 
   async function refreshStatus() {
     try {
       setStatus(await api.status())
     } catch {
-      /* backend may not be up yet */
+      /* backend may still be loading the embedding model */
     }
   }
 
   useEffect(() => {
+    let cancelled = false
     ;(async () => {
-      await refreshStatus()
+      // Session check only — do NOT wait on /api/status (it can load torch/embeddings).
       try {
-        setUser(await api.me())
+        const me = await api.me()
+        if (!cancelled) setUser(me)
       } catch {
-        setUser(null)
+        if (!cancelled) setUser(null)
       } finally {
-        setBooting(false)
+        if (!cancelled) setBooting(false)
       }
+      // Status pills refresh in the background
+      refreshStatus()
     })()
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   async function handleLogout() {
-    await api.logout()
+    try {
+      await api.logout()
+    } catch {
+      /* ignore */
+    }
     setUser(null)
   }
 
@@ -39,6 +51,7 @@ export default function App() {
     return (
       <div className="main">
         <div className="empty">Loading Talent Graph…</div>
+        {bootError && <div className="msg error">{bootError}</div>}
       </div>
     )
   }
@@ -55,9 +68,9 @@ export default function App() {
             LLM: {status?.llm || '—'}
           </span>
           <span className={`pill ${status?.embedder && status.embedder !== 'fallback' ? 'ok' : 'warn'}`}>
-            Embeddings: {status?.embedder || '—'}
+            Embeddings: {status?.embedder || 'loading…'}
           </span>
-          <span className="pill">{status?.jd_count ?? 0} JDs</span>
+          <span className="pill">{status?.jd_count ?? '—'} JDs</span>
         </div>
         {user && (
           <div className="topbar-right">
