@@ -11,6 +11,12 @@ from fastapi import Cookie, Depends, HTTPException, Response
 from app.db import conn
 
 SESSION_DAYS = 7
+COOKIE_KW = dict(
+    httponly=True,
+    samesite="lax",
+    path="/",
+    max_age=SESSION_DAYS * 86400,
+)
 
 
 def hash_password(pw: str) -> str:
@@ -38,14 +44,14 @@ def start_session(response: Response, user_id: int) -> None:
     exp = (datetime.now(timezone.utc) + timedelta(days=SESSION_DAYS)).isoformat()
     with conn() as c:
         c.execute("INSERT INTO sessions VALUES(?,?,?)", (_h(token), user_id, exp))
-    response.set_cookie("session", token, httponly=True, samesite="lax", max_age=SESSION_DAYS * 86400)
+    response.set_cookie("session", token, **COOKIE_KW)
 
 
 def end_session(response: Response, token: Optional[str]) -> None:
     if token:
         with conn() as c:
             c.execute("DELETE FROM sessions WHERE token_hash=?", (_h(token),))
-    response.delete_cookie("session")
+    response.delete_cookie("session", path="/")
 
 
 def current_user(session: Optional[str] = Cookie(None)) -> dict:
