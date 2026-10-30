@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Optional
 
 from app.vectorstore.company_store import collection_size
 
@@ -15,7 +16,7 @@ CANDIDATE_PATHS = [
 ]
 
 
-def _find_json() -> Path | None:
+def _find_json() -> Optional[Path]:
     for p in CANDIDATE_PATHS:
         try:
             if p.is_file() and p.stat().st_size > 50:
