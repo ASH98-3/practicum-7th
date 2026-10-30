@@ -1,13 +1,13 @@
 """
-Load scraped JDs into Chroma and create company login accounts for each company.
+Load scraped JDs into Chroma (+ optional company accounts).
 
-Run from anywhere (repo root or tools/):
+Run from the repo root:
 
     python tools/load_scraped_jds.py
-    python load_scraped_jds.py
 
-Default password for every company account: Demo@1234
-Email pattern: company@<slug>.demo  e.g. company@airbnb.demo
+Or with an explicit file:
+
+    python tools/load_scraped_jds.py --file tools/data/collected_jds.json
 """
 from __future__ import annotations
 
@@ -16,39 +16,62 @@ import json
 import re
 import sys
 from pathlib import Path
+from typing import List, Optional
 
-ROOT = Path(__file__).resolve().parents[1]
+# tools/ -> repo root
+ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.auth import hash_password
-from app.db import conn, init_db
-from app.ingestion.service import ingest_jd, _slug
-from app.vectorstore.company_store import collection_size
-
+DEFAULT_JSON = ROOT / "tools" / "data" / "collected_jds.json"
+FALLBACK_JSON = ROOT / "data" / "collected_jds.json"
 PASSWORD = "Demo@1234"
-DEFAULT_FILES = [
-    ROOT / "tools" / "data" / "collected_jds.json",
-    ROOT / "data" / "collected_jds.json",
-]
 
 
-def _email_for(company: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "", (company or "company").lower()) or "company"
-    return f"company@{slug[:40]}.demo"
+def find_json(user_path: Optional[str]) -> Path:
+    candidates: List[Path] = []
+    if user_path:
+        p = Path(user_path)
+        candidates.append(p if p.is_absolute() else (Path.cwd() / p))
+        candidates.append(ROOT / user_path)
+    candidates.extend([DEFAULT_JSON, FALLBACK_JSON])
+
+    tried = []
+    for p in candidates:
+        p = p.resolve()
+        tried.append(str(p))
+        if p.is_file() and p.stat().st_size > 50:
+            return p
+
+    print("ERROR: could not find collected_jds.json")
+    print("Tried:")
+    for t in tried:
+        print("  ", t)
+    print()
+    print("Expected file at:")
+    print("  ", DEFAULT_JSON)
+    print("Check with:  dir tools\\data\\collected_jds.json")
+    sys.exit(1)
 
 
 def ensure_company_account(company_name: str) -> None:
-    company_name = company_name.strip()
+    from app.auth import hash_password
+    from app.db import conn
+    from app.ingestion.service import _slug
+
+    company_name = (company_name or "").strip()
     if len(company_name) < 2:
         return
     cid = _slug(company_name)
-    email = _email_for(company_name)
+    slug = re.sub(r"[^a-z0-9]+", "", company_name.lower()) or "company"
+    email = f"company@{slug[:40]}.demo"
+
     with conn() as c:
-        by_email = c.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
-        by_cid = c.execute("SELECT id FROM users WHERE company_id=?", (cid,)).fetchone()
-        if by_email or by_cid:
-            print(f"  skip account  {email} / {company_name}")
+        if c.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone():
+            print(f"  skip account  {email}")
+            return
+        if c.execute("SELECT id FROM users WHERE company_id=?", (cid,)).fetchone():
+            print(f"  skip account  company_id={cid}")
             return
         c.execute(
             "INSERT INTO users(email,password_hash,role,name,company_name,company_id) VALUES(?,?,?,?,?,?)",
@@ -57,49 +80,40 @@ def ensure_company_account(company_name: str) -> None:
         print(f"  + account     {email}  ({company_name})")
 
 
-def resolve_file(user_path: str | None) -> Path:
-    if user_path:
-        p = Path(user_path)
-        if not p.is_file():
-            p = (ROOT / user_path).resolve()
-        if p.is_file():
-            return p
-        raise SystemExit(f"File not found: {user_path}")
-
-    for candidate in DEFAULT_FILES:
-        if candidate.is_file() and candidate.stat().st_size > 10:
-            return candidate
-
-    raise SystemExit(
-        "No collected JDs file found. Expected one of:\n"
-        + "\n".join(f"  - {p}" for p in DEFAULT_FILES)
-    )
-
-
 def main() -> int:
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description="Import scraped JDs into Talent Graph")
     ap.add_argument("--file", default=None, help="Path to collected_jds.json")
-    ap.add_argument("--limit", type=int, default=0, help="0 = all")
+    ap.add_argument("--limit", type=int, default=0, help="Max jobs to import (0=all)")
     ap.add_argument("--min-chars", type=int, default=200)
     ap.add_argument("--skip-accounts", action="store_true")
     args = ap.parse_args()
 
-    path = resolve_file(args.file)
+    print("Repo root:", ROOT)
+    path = find_json(args.file)
+    print("Using JSON:", path)
+    print("File size:", path.stat().st_size, "bytes")
+
     rows = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(rows, list) or not rows:
-        print(f"No jobs in {path}")
+        print("ERROR: JSON is empty or not a list")
         return 1
+    print("Jobs in file:", len(rows))
+
+    from app.db import init_db
+    from app.ingestion.service import ingest_jd
+    from app.vectorstore.company_store import collection_size
 
     init_db()
-    print(f"Loading {len(rows)} rows from {path} …\n")
 
-    companies = sorted({(r.get("company") or r.get("board") or "Unknown").strip() for r in rows})
     if not args.skip_accounts:
-        print("Company accounts:")
+        print("\nCompany accounts:")
+        companies = sorted(
+            {(r.get("company") or r.get("board") or "Unknown").strip() for r in rows}
+        )
         for name in companies:
             ensure_company_account(name)
 
-    print("\nJob descriptions:")
+    print("\nImporting job descriptions…")
     n = 0
     for row in rows:
         text = (row.get("text") or "").strip()
@@ -108,15 +122,19 @@ def main() -> int:
         url = row.get("url") or ""
         if len(text) < args.min_chars:
             continue
-        ingest_jd(company, title, text, url)
+        try:
+            ingest_jd(company, title, text, url)
+        except Exception as e:
+            print(f"  ! fail {company} — {title[:50]}: {e}")
+            continue
         n += 1
-        print(f"  + {company} — {title[:70]}")
+        print(f"  + [{n}] {company} — {title[:70]}")
         if args.limit and n >= args.limit:
             break
 
-    print(f"\nDone. Imported {n} JDs. Vector store size: {collection_size()}")
-    print(f"All company passwords: {PASSWORD}")
-    print("Candidate demo: python seed_demo.py  (optional)")
+    print(f"\nDone. Imported {n} JDs.")
+    print(f"Vector store size: {collection_size()}")
+    print(f"Company password (if accounts created): {PASSWORD}")
     return 0
 
 
