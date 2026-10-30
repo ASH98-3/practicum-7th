@@ -1,10 +1,5 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
-
-const DEMOS = [
-  { email: 'company@nimbus.dev', password: 'Demo@1234', label: 'Company — Nimbus' },
-  { email: 'candidate@demo.dev', password: 'Demo@1234', label: 'Candidate — Priya' },
-]
 
 export default function Auth({ onAuth }) {
   const [mode, setMode] = useState('login')
@@ -16,6 +11,39 @@ export default function Auth({ onAuth }) {
   const [msg, setMsg] = useState('')
   const [err, setErr] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [jobs, setJobs] = useState([])
+  const [jobsError, setJobsError] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const data = await api.publicJobs()
+        if (!cancelled) {
+          setJobs(Array.isArray(data) ? data : [])
+          setJobsError('')
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setJobs([])
+          setJobsError(e.message || 'Could not load jobs — is the backend running?')
+        }
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const companies = useMemo(() => {
+    const map = new Map()
+    for (const j of jobs) {
+      const name = j.company || 'Unknown'
+      if (!map.has(name)) map.set(name, [])
+      map.get(name).push(j)
+    }
+    return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+  }, [jobs])
 
   async function submit(e) {
     e.preventDefault()
@@ -41,14 +69,6 @@ export default function Auth({ onAuth }) {
     } finally {
       setLoading(false)
     }
-  }
-
-  function fillDemo(d) {
-    setMode('login')
-    setEmail(d.email)
-    setPassword(d.password)
-    setMsg('')
-    setErr(false)
   }
 
   return (
@@ -123,24 +143,46 @@ export default function Auth({ onAuth }) {
           </form>
         </div>
 
-        <div className="card demo-card">
-          <h2>Quick demo logins</h2>
+        <div className="card demo-card companies-panel">
+          <h2>Companies hiring</h2>
           <p className="muted">
-            Run <code>python seed_demo.py</code> once first, then click a preset:
+            Scraped / registered roles available for matching ({jobs.length} jobs
+            {companies.length ? ` · ${companies.length} companies` : ''}).
           </p>
-          <div className="demo-list">
-            {DEMOS.map((d) => (
-              <button key={d.email} type="button" className="demo-btn" onClick={() => fillDemo(d)}>
-                <strong>{d.label}</strong>
-                <span>{d.email}</span>
-              </button>
+
+          {jobsError && <div className="msg error">{jobsError}</div>}
+
+          {!jobsError && jobs.length === 0 && (
+            <div className="empty">
+              No jobs loaded yet. With the backend running, execute:
+              <br />
+              <code>python tools/load_scraped_jds.py</code>
+            </div>
+          )}
+
+          <div className="company-list">
+            {companies.map(([company, roles]) => (
+              <details key={company} className="company-block">
+                <summary>
+                  <strong>{company}</strong>
+                  <span className="muted">{roles.length} role{roles.length === 1 ? '' : 's'}</span>
+                </summary>
+                <ul className="role-list">
+                  {roles.map((r) => (
+                    <li key={r.jd_id || `${company}-${r.title}`}>
+                      <span>{r.title}</span>
+                      {(r.required_skills || []).length > 0 && (
+                        <div className="chips">
+                          {(r.required_skills || []).slice(0, 5).map((s) => (
+                            <span className="chip" key={s}>{s}</span>
+                          ))}
+                        </div>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </details>
             ))}
-          </div>
-          <div className="feature-list">
-            <div><span className="dot" /> PDF / DOCX resume upload</div>
-            <div><span className="dot" /> Semantic JD retrieval</div>
-            <div><span className="dot" /> ATS score + LLM rationale</div>
-            <div><span className="dot" /> Company shortlist workflow</div>
           </div>
         </div>
       </div>
