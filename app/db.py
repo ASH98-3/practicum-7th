@@ -1,4 +1,9 @@
-"""SQLite for accounts, sessions, resumes and matches. (JD vectors live in Chroma.)"""
+"""SQLite for accounts, sessions, resumes, matches, and JD metadata.
+
+JD *vectors* still live in Chroma; metadata for listing/counting is in SQLite so
+Windows clients do not hit chromadb on every status/jobs request (which was
+causing access-violation crashes).
+"""
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -24,16 +29,26 @@ CREATE TABLE IF NOT EXISTS matches(
   candidate_id INTEGER NOT NULL REFERENCES users(id),
   jd_id TEXT NOT NULL, jd_title TEXT, jd_url TEXT, company_id TEXT NOT NULL, company TEXT NOT NULL,
   ats_score REAL, similarity REAL, rationale TEXT,
-  status TEXT NOT NULL DEFAULT 'new',   -- new | shortlisted | rejected | not_sent
+  status TEXT NOT NULL DEFAULT 'new',
   assessment_at TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS ix_match_company ON matches(company_id);
 CREATE INDEX IF NOT EXISTS ix_match_candidate ON matches(candidate_id);
+CREATE TABLE IF NOT EXISTS jd_meta(
+  jd_id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL,
+  company TEXT NOT NULL,
+  title TEXT NOT NULL,
+  url TEXT DEFAULT '',
+  required_skills TEXT DEFAULT '',
+  min_experience_years INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS ix_jd_company ON jd_meta(company_id);
 """
 
 
 @contextmanager
 def conn():
-    c = sqlite3.connect(DB_PATH)
+    c = sqlite3.connect(DB_PATH, timeout=30)
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA foreign_keys=ON")
     try:
