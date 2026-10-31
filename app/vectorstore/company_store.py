@@ -1,8 +1,8 @@
-"""Persistent Chroma store of every company's JDs.
+"""JD vectors in Chroma; JD listing/counting in SQLite (Windows-safe).
 
-All Chroma calls are serialized with a process-wide lock. Concurrent access to
-chromadb's Rust bindings causes Windows access violations (fatal exception)
-under uvicorn/anyio threadpools.
+chromadb's Rust bindings crash under concurrent uvicorn threads on Windows
+(access violation in _count). Listing and status therefore use SQLite jd_meta.
+Chroma is only used for upsert + similarity query, under a lock.
 """
 import threading
 from typing import List, Optional
@@ -10,12 +10,12 @@ from typing import List, Optional
 import chromadb
 
 from app.config import CHROMA_PERSIST_DIR, JD_COLLECTION_NAME
+from app.db import conn
 from app.embeddings.embedder import embed_text, embed_batch, build_embedding_text
 from app.schemas.models import JDData, MatchScore
 
 _collection = None
 _lock = threading.RLock()
-_cached_count: Optional[int] = None
 
 
 def _get_collection():
@@ -33,7 +33,10 @@ def _text(jd: JDData) -> str:
 
 def _meta(jd: JDData) -> dict:
     return {
-        "company_id": jd.company_id, "company": jd.company, "title": jd.title, "url": jd.url or "",
+        "company_id": jd.company_id,
+        "company": jd.company,
+        "title": jd.title,
+        "url": jd.url or "",
         "required_skills": ",".join(jd.required_skills or []),
         "min_experience_years": int(jd.min_experience_years or 0),
         "education_requirement": jd.education_requirement or "",
@@ -41,13 +44,35 @@ def _meta(jd: JDData) -> dict:
     }
 
 
-def _invalidate_count() -> None:
-    global _cached_count
-    _cached_count = None
+def _upsert_sqlite(jd: JDData) -> None:
+    skills = ",".join(jd.required_skills or [])
+    with conn() as c:
+        c.execute(
+            "INSERT INTO jd_meta(jd_id,company_id,company,title,url,required_skills,min_experience_years) "
+            "VALUES(?,?,?,?,?,?,?) "
+            "ON CONFLICT(jd_id) DO UPDATE SET "
+            "company_id=excluded.company_id, company=excluded.company, title=excluded.title, "
+            "url=excluded.url, required_skills=excluded.required_skills, "
+            "min_experience_years=excluded.min_experience_years",
+            (
+                jd.jd_id,
+                jd.company_id,
+                jd.company,
+                jd.title,
+                jd.url or "",
+                skills,
+                int(jd.min_experience_years or 0),
+            ),
+        )
+
+
+def _delete_sqlite(jd_id: str) -> None:
+    with conn() as c:
+        c.execute("DELETE FROM jd_meta WHERE jd_id=?", (jd_id,))
 
 
 def register_jd(jd: JDData) -> None:
-    global _cached_count
+    _upsert_sqlite(jd)
     with _lock:
         _get_collection().upsert(
             ids=[jd.jd_id],
@@ -55,12 +80,13 @@ def register_jd(jd: JDData) -> None:
             documents=[jd.raw_text],
             metadatas=[_meta(jd)],
         )
-        _invalidate_count()
 
 
 def register_jds_bulk(jds: List[JDData]) -> None:
     if not jds:
         return
+    for jd in jds:
+        _upsert_sqlite(jd)
     with _lock:
         _get_collection().upsert(
             ids=[j.jd_id for j in jds],
@@ -68,15 +94,18 @@ def register_jds_bulk(jds: List[JDData]) -> None:
             documents=[j.raw_text for j in jds],
             metadatas=[_meta(j) for j in jds],
         )
-        _invalidate_count()
 
 
 def _to_jd(jd_id: str, meta: dict, doc: str) -> JDData:
     meta = meta or {}
     skills = meta.get("required_skills") or ""
     return JDData(
-        jd_id=jd_id, company_id=meta.get("company_id", ""), company=meta.get("company", ""),
-        title=meta.get("title", ""), url=meta.get("url", ""), raw_text=doc or "",
+        jd_id=jd_id,
+        company_id=meta.get("company_id", ""),
+        company=meta.get("company", ""),
+        title=meta.get("title", ""),
+        url=meta.get("url", ""),
+        raw_text=doc or "",
         required_skills=[s for s in str(skills).split(",") if s],
         min_experience_years=int(meta.get("min_experience_years") or 0),
         education_requirement=meta.get("education_requirement") or "",
@@ -93,40 +122,40 @@ def get_jd_by_id(jd_id: str) -> Optional[JDData]:
 
 
 def list_jds(company_id: Optional[str] = None) -> List[dict]:
-    with _lock:
-        try:
-            col = _get_collection()
-            if col.count() == 0:
-                return []
-            kwargs = {"include": ["metadatas"]}
-            if company_id:
-                kwargs["where"] = {"company_id": company_id}
-            r = col.get(**kwargs)
-        except Exception as e:
-            print(f"[company_store] list_jds failed: {type(e).__name__}: {e}")
-            return []
-
-        ids = r.get("ids") or []
-        metas = r.get("metadatas") or []
-        rows = []
-        for i, m in zip(ids, metas):
-            m = m or {}
-            skills = m.get("required_skills") or ""
-            rows.append({
-                "jd_id": i,
-                "company": m.get("company") or "",
-                "title": m.get("title") or "",
-                "url": m.get("url") or "",
-                "required_skills": [s for s in str(skills).split(",") if s],
-                "min_experience_years": int(m.get("min_experience_years") or 0),
-            })
-        return sorted(rows, key=lambda x: (x["company"], x["title"]))
+    """List from SQLite — never touches Chroma (safe for concurrent UI polls)."""
+    with conn() as c:
+        if company_id:
+            rows = c.execute(
+                "SELECT jd_id, company, title, url, required_skills, min_experience_years "
+                "FROM jd_meta WHERE company_id=? ORDER BY company, title",
+                (company_id,),
+            ).fetchall()
+        else:
+            rows = c.execute(
+                "SELECT jd_id, company, title, url, required_skills, min_experience_years "
+                "FROM jd_meta ORDER BY company, title"
+            ).fetchall()
+    out = []
+    for r in rows:
+        skills = r["required_skills"] or ""
+        out.append({
+            "jd_id": r["jd_id"],
+            "company": r["company"] or "",
+            "title": r["title"] or "",
+            "url": r["url"] or "",
+            "required_skills": [s for s in str(skills).split(",") if s],
+            "min_experience_years": int(r["min_experience_years"] or 0),
+        })
+    return out
 
 
 def delete_jd(jd_id: str) -> None:
+    _delete_sqlite(jd_id)
     with _lock:
-        _get_collection().delete(ids=[jd_id])
-        _invalidate_count()
+        try:
+            _get_collection().delete(ids=[jd_id])
+        except Exception as e:
+            print(f"[company_store] chroma delete failed: {e}")
 
 
 def query_top_jds(resume_embedding: List[float], top_k: int) -> List[MatchScore]:
@@ -157,14 +186,11 @@ def query_top_jds(resume_embedding: List[float], top_k: int) -> List[MatchScore]
 
 
 def collection_size() -> int:
-    """Cached count — avoids hammering chromadb._count from concurrent status calls."""
-    global _cached_count
-    with _lock:
-        if _cached_count is not None:
-            return _cached_count
-        try:
-            _cached_count = int(_get_collection().count())
-        except Exception as e:
-            print(f"[company_store] count failed: {type(e).__name__}: {e}")
-            _cached_count = 0
-        return _cached_count
+    """Count from SQLite — no chromadb._count (that crashed Windows)."""
+    try:
+        with conn() as c:
+            row = c.execute("SELECT COUNT(*) AS n FROM jd_meta").fetchone()
+            return int(row["n"] if row else 0)
+    except Exception as e:
+        print(f"[company_store] sqlite count failed: {e}")
+        return 0
