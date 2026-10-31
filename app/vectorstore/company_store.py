@@ -1,14 +1,21 @@
-"""Persistent Chroma store of every company's JDs. We embed with our own embedder
-and pass vectors in explicitly, so resume and JD vectors always come from the
-same model. Resumes are NOT stored (one-at-a-time flow)."""
-import chromadb
+"""Persistent Chroma store of every company's JDs.
+
+All Chroma calls are serialized with a process-wide lock. Concurrent access to
+chromadb's Rust bindings causes Windows access violations (fatal exception)
+under uvicorn/anyio threadpools.
+"""
+import threading
 from typing import List, Optional
+
+import chromadb
 
 from app.config import CHROMA_PERSIST_DIR, JD_COLLECTION_NAME
 from app.embeddings.embedder import embed_text, embed_batch, build_embedding_text
 from app.schemas.models import JDData, MatchScore
 
 _collection = None
+_lock = threading.RLock()
+_cached_count: Optional[int] = None
 
 
 def _get_collection():
@@ -34,16 +41,34 @@ def _meta(jd: JDData) -> dict:
     }
 
 
+def _invalidate_count() -> None:
+    global _cached_count
+    _cached_count = None
+
+
 def register_jd(jd: JDData) -> None:
-    _get_collection().upsert(ids=[jd.jd_id], embeddings=[embed_text(_text(jd))],
-                             documents=[jd.raw_text], metadatas=[_meta(jd)])
+    global _cached_count
+    with _lock:
+        _get_collection().upsert(
+            ids=[jd.jd_id],
+            embeddings=[embed_text(_text(jd))],
+            documents=[jd.raw_text],
+            metadatas=[_meta(jd)],
+        )
+        _invalidate_count()
 
 
 def register_jds_bulk(jds: List[JDData]) -> None:
     if not jds:
         return
-    _get_collection().upsert(ids=[j.jd_id for j in jds], embeddings=embed_batch([_text(j) for j in jds]),
-                             documents=[j.raw_text for j in jds], metadatas=[_meta(j) for j in jds])
+    with _lock:
+        _get_collection().upsert(
+            ids=[j.jd_id for j in jds],
+            embeddings=embed_batch([_text(j) for j in jds]),
+            documents=[j.raw_text for j in jds],
+            metadatas=[_meta(j) for j in jds],
+        )
+        _invalidate_count()
 
 
 def _to_jd(jd_id: str, meta: dict, doc: str) -> JDData:
@@ -55,76 +80,91 @@ def _to_jd(jd_id: str, meta: dict, doc: str) -> JDData:
         required_skills=[s for s in str(skills).split(",") if s],
         min_experience_years=int(meta.get("min_experience_years") or 0),
         education_requirement=meta.get("education_requirement") or "",
-        parsed_summary=meta.get("parsed_summary") or "")
+        parsed_summary=meta.get("parsed_summary") or "",
+    )
 
 
 def get_jd_by_id(jd_id: str) -> Optional[JDData]:
-    r = _get_collection().get(ids=[jd_id], include=["documents", "metadatas"])
-    if not r or not r.get("ids"):
-        return None
-    return _to_jd(jd_id, (r.get("metadatas") or [None])[0], (r.get("documents") or [""])[0])
+    with _lock:
+        r = _get_collection().get(ids=[jd_id], include=["documents", "metadatas"])
+        if not r or not r.get("ids"):
+            return None
+        return _to_jd(jd_id, (r.get("metadatas") or [None])[0], (r.get("documents") or [""])[0])
 
 
 def list_jds(company_id: Optional[str] = None) -> List[dict]:
-    """List JD metadata. Safe on empty collections and partial metadata."""
-    try:
-        col = _get_collection()
-        if col.count() == 0:
+    with _lock:
+        try:
+            col = _get_collection()
+            if col.count() == 0:
+                return []
+            kwargs = {"include": ["metadatas"]}
+            if company_id:
+                kwargs["where"] = {"company_id": company_id}
+            r = col.get(**kwargs)
+        except Exception as e:
+            print(f"[company_store] list_jds failed: {type(e).__name__}: {e}")
             return []
-        kwargs = {"include": ["metadatas"]}
-        if company_id:
-            kwargs["where"] = {"company_id": company_id}
-        r = col.get(**kwargs)
-    except Exception as e:
-        print(f"[company_store] list_jds failed: {type(e).__name__}: {e}")
-        return []
 
-    ids = r.get("ids") or []
-    metas = r.get("metadatas") or []
-    rows = []
-    for i, m in zip(ids, metas):
-        m = m or {}
-        skills = m.get("required_skills") or ""
-        rows.append({
-            "jd_id": i,
-            "company": m.get("company") or "",
-            "title": m.get("title") or "",
-            "url": m.get("url") or "",
-            "required_skills": [s for s in str(skills).split(",") if s],
-            "min_experience_years": int(m.get("min_experience_years") or 0),
-        })
-    return sorted(rows, key=lambda x: (x["company"], x["title"]))
+        ids = r.get("ids") or []
+        metas = r.get("metadatas") or []
+        rows = []
+        for i, m in zip(ids, metas):
+            m = m or {}
+            skills = m.get("required_skills") or ""
+            rows.append({
+                "jd_id": i,
+                "company": m.get("company") or "",
+                "title": m.get("title") or "",
+                "url": m.get("url") or "",
+                "required_skills": [s for s in str(skills).split(",") if s],
+                "min_experience_years": int(m.get("min_experience_years") or 0),
+            })
+        return sorted(rows, key=lambda x: (x["company"], x["title"]))
 
 
 def delete_jd(jd_id: str) -> None:
-    _get_collection().delete(ids=[jd_id])
+    with _lock:
+        _get_collection().delete(ids=[jd_id])
+        _invalidate_count()
 
 
 def query_top_jds(resume_embedding: List[float], top_k: int) -> List[MatchScore]:
-    c = _get_collection()
-    n = c.count()
-    if n == 0:
-        return []
-    r = c.query(query_embeddings=[resume_embedding], n_results=min(top_k, n),
-                include=["metadatas", "distances"])
-    ids = (r.get("ids") or [[]])[0]
-    metas = (r.get("metadatas") or [[]])[0]
-    dists = (r.get("distances") or [[]])[0]
-    return [
-        MatchScore(
-            jd_id=i,
-            company_id=(m or {}).get("company_id", ""),
-            company=(m or {}).get("company", ""),
-            title=(m or {}).get("title", ""),
-            url=(m or {}).get("url", ""),
-            similarity_score=round(1.0 - float(d), 4),
+    with _lock:
+        c = _get_collection()
+        n = c.count()
+        if n == 0:
+            return []
+        r = c.query(
+            query_embeddings=[resume_embedding],
+            n_results=min(top_k, n),
+            include=["metadatas", "distances"],
         )
-        for i, m, d in zip(ids, metas, dists)
-    ]
+        ids = (r.get("ids") or [[]])[0]
+        metas = (r.get("metadatas") or [[]])[0]
+        dists = (r.get("distances") or [[]])[0]
+        return [
+            MatchScore(
+                jd_id=i,
+                company_id=(m or {}).get("company_id", ""),
+                company=(m or {}).get("company", ""),
+                title=(m or {}).get("title", ""),
+                url=(m or {}).get("url", ""),
+                similarity_score=round(1.0 - float(d), 4),
+            )
+            for i, m, d in zip(ids, metas, dists)
+        ]
 
 
 def collection_size() -> int:
-    try:
-        return _get_collection().count()
-    except Exception:
-        return 0
+    """Cached count — avoids hammering chromadb._count from concurrent status calls."""
+    global _cached_count
+    with _lock:
+        if _cached_count is not None:
+            return _cached_count
+        try:
+            _cached_count = int(_get_collection().count())
+        except Exception as e:
+            print(f"[company_store] count failed: {type(e).__name__}: {e}")
+            _cached_count = 0
+        return _cached_count
