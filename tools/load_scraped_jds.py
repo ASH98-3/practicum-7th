@@ -1,13 +1,10 @@
 """
-Load scraped JDs into Chroma (+ optional company accounts).
+Load scraped JDs into SQLite (and optionally Chroma).
 
-Run from the repo root:
+Default is SQLite-only — stable on Windows. Matching still works via fallback.
 
     python tools/load_scraped_jds.py
-
-Or with an explicit file:
-
-    python tools/load_scraped_jds.py --file tools/data/collected_jds.json
+    python tools/load_scraped_jds.py --with-chroma   # optional, may crash on some Windows setups
 """
 from __future__ import annotations
 
@@ -18,7 +15,6 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-# tools/ -> repo root
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -44,13 +40,8 @@ def find_json(user_path: Optional[str]) -> Path:
             return p
 
     print("ERROR: could not find collected_jds.json")
-    print("Tried:")
     for t in tried:
         print("  ", t)
-    print()
-    print("Expected file at:")
-    print("  ", DEFAULT_JSON)
-    print("Check with:  dir tools\\data\\collected_jds.json")
     sys.exit(1)
 
 
@@ -82,10 +73,15 @@ def ensure_company_account(company_name: str) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Import scraped JDs into Talent Graph")
-    ap.add_argument("--file", default=None, help="Path to collected_jds.json")
-    ap.add_argument("--limit", type=int, default=0, help="Max jobs to import (0=all)")
+    ap.add_argument("--file", default=None)
+    ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--min-chars", type=int, default=200)
     ap.add_argument("--skip-accounts", action="store_true")
+    ap.add_argument(
+        "--with-chroma",
+        action="store_true",
+        help="Also write embedding vectors (can crash on some Windows + chromadb setups)",
+    )
     args = ap.parse_args()
 
     print("Repo root:", ROOT)
@@ -98,6 +94,7 @@ def main() -> int:
         print("ERROR: JSON is empty or not a list")
         return 1
     print("Jobs in file:", len(rows))
+    print("Mode:", "SQLite + Chroma" if args.with_chroma else "SQLite only (recommended on Windows)")
 
     from app.db import init_db
     from app.ingestion.service import ingest_jd
@@ -115,6 +112,7 @@ def main() -> int:
 
     print("\nImporting job descriptions…")
     n = 0
+    skip_chroma = not args.with_chroma
     for row in rows:
         text = (row.get("text") or "").strip()
         title = (row.get("title") or "Untitled").strip()
@@ -123,18 +121,21 @@ def main() -> int:
         if len(text) < args.min_chars:
             continue
         try:
-            ingest_jd(company, title, text, url)
+            ingest_jd(company, title, text, url, skip_chroma=skip_chroma)
         except Exception as e:
             print(f"  ! fail {company} — {title[:50]}: {e}")
             continue
         n += 1
-        print(f"  + [{n}] {company} — {title[:70]}")
+        if n == 1 or n % 10 == 0:
+            print(f"  + [{n}] {company} — {title[:70]}")
         if args.limit and n >= args.limit:
             break
 
     print(f"\nDone. Imported {n} JDs.")
-    print(f"Vector store size: {collection_size()}")
+    print(f"SQLite jd_meta count: {collection_size()}")
     print(f"Company password (if accounts created): {PASSWORD}")
+    if skip_chroma:
+        print("Note: vectors not written (SQLite-only). Matching uses skill/ATS fallback.")
     return 0
 
 
