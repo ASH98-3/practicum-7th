@@ -1,15 +1,14 @@
 """
-Embedding helper for resume <-> JD similarity.
+Semantic embeddings for resume <-> JD matching (core RAG retrieval).
 
-On Windows, loading sentence-transformers / torch has been causing hard
-process kills (access violations) in this project environment. We therefore
-default to deterministic pseudo-embeddings on Windows so matching stays up.
-Set FORCE_REAL_EMBEDDINGS=1 to try the real model anyway.
+Uses sentence-transformers (all-MiniLM-L6-v2 by default). If the model cannot
+load, falls back to deterministic pseudo-embeddings so the API still runs.
+
+Run inside the project venv so torch/chromadb binaries match this app.
 """
 import hashlib
 import math
 import os
-import platform
 import re
 from typing import List
 
@@ -17,28 +16,29 @@ from app.config import EMBEDDING_MODEL_NAME
 
 _model = None
 _model_load_failed = False
+_load_error = ""
 PSEUDO_DIM = 384
 
-_FORCE_REAL = os.getenv("FORCE_REAL_EMBEDDINGS", "").strip().lower() in {"1", "true", "yes"}
-_USE_PSEUDO = (platform.system() == "Windows" and not _FORCE_REAL) or (
-    os.getenv("FORCE_PSEUDO_EMBEDDINGS", "").strip().lower() in {"1", "true", "yes"}
-)
+# Set FORCE_PSEUDO_EMBEDDINGS=1 only for emergency offline demos
+_FORCE_PSEUDO = os.getenv("FORCE_PSEUDO_EMBEDDINGS", "").strip().lower() in {"1", "true", "yes"}
 
 
 def _get_model():
-    global _model, _model_load_failed
-    if _USE_PSEUDO:
+    global _model, _model_load_failed, _load_error
+    if _FORCE_PSEUDO:
         return None
     if _model is not None or _model_load_failed:
         return _model
     try:
         from sentence_transformers import SentenceTransformer
         _model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+        print(f"[embedder] loaded {EMBEDDING_MODEL_NAME}")
     except Exception as e:
         _model_load_failed = True
+        _load_error = f"{type(e).__name__}: {e}"
         print(
-            f"[embedder] Could not load '{EMBEDDING_MODEL_NAME}' "
-            f"({type(e).__name__}: {e}). Using pseudo-embeddings."
+            f"[embedder] Could not load '{EMBEDDING_MODEL_NAME}' ({_load_error}). "
+            "Using pseudo-embeddings until the project venv has sentence-transformers/torch."
         )
     return _model
 
@@ -73,10 +73,10 @@ def build_embedding_text(title: str, skills: List[str], body: str) -> str:
 
 
 def embedder_status() -> str:
-    if _USE_PSEUDO:
-        return "pseudo (windows-safe)"
+    if _FORCE_PSEUDO:
+        return "pseudo (forced)"
     if _model_load_failed:
-        return "fallback"
+        return "pseudo (model load failed)"
     if _model is None:
-        return "ready (loads on first match)"
+        return "sentence-transformers (lazy)"
     return "sentence-transformers"
