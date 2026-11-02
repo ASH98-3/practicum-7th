@@ -1,9 +1,4 @@
-"""SQLite for accounts, sessions, resumes, matches, and JD metadata.
-
-JD *vectors* still live in Chroma; metadata for listing/counting is in SQLite so
-Windows clients do not hit chromadb on every status/jobs request (which was
-causing access-violation crashes).
-"""
+"""SQLite for accounts, sessions, resumes, matches, and JD metadata."""
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -41,6 +36,9 @@ CREATE TABLE IF NOT EXISTS jd_meta(
   url TEXT DEFAULT '',
   required_skills TEXT DEFAULT '',
   min_experience_years INTEGER DEFAULT 0,
+  education_requirement TEXT DEFAULT '',
+  parsed_summary TEXT DEFAULT '',
+  raw_text TEXT DEFAULT '',
   created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS ix_jd_company ON jd_meta(company_id);
 """
@@ -62,3 +60,12 @@ def init_db():
     os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)), exist_ok=True)
     with conn() as c:
         c.executescript(SCHEMA)
+        # migrate older jd_meta without raw_text / extra columns
+        cols = {r[1] for r in c.execute("PRAGMA table_info(jd_meta)").fetchall()}
+        for col, decl in [
+            ("education_requirement", "TEXT DEFAULT ''"),
+            ("parsed_summary", "TEXT DEFAULT ''"),
+            ("raw_text", "TEXT DEFAULT ''"),
+        ]:
+            if col not in cols:
+                c.execute(f"ALTER TABLE jd_meta ADD COLUMN {col} {decl}")
