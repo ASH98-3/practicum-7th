@@ -1,10 +1,10 @@
 """
-Load scraped JDs into SQLite (and optionally Chroma).
+Load scraped JDs into SQLite + Chroma (real embeddings when model is available).
 
-Default is SQLite-only — stable on Windows. Matching still works via fallback.
+Run inside the project venv:
 
     python tools/load_scraped_jds.py
-    python tools/load_scraped_jds.py --with-chroma   # optional, may crash on some Windows setups
+    python tools/load_scraped_jds.py --sqlite-only   # emergency: no vectors
 """
 from __future__ import annotations
 
@@ -78,13 +78,14 @@ def main() -> int:
     ap.add_argument("--min-chars", type=int, default=200)
     ap.add_argument("--skip-accounts", action="store_true")
     ap.add_argument(
-        "--with-chroma",
+        "--sqlite-only",
         action="store_true",
-        help="Also write embedding vectors (can crash on some Windows + chromadb setups)",
+        help="Skip Chroma/embeddings (emergency only; retrieval will be weak)",
     )
     args = ap.parse_args()
 
     print("Repo root:", ROOT)
+    print("Python:", sys.executable)
     path = find_json(args.file)
     print("Using JSON:", path)
     print("File size:", path.stat().st_size, "bytes")
@@ -94,7 +95,7 @@ def main() -> int:
         print("ERROR: JSON is empty or not a list")
         return 1
     print("Jobs in file:", len(rows))
-    print("Mode:", "SQLite + Chroma" if args.with_chroma else "SQLite only (recommended on Windows)")
+    print("Mode:", "SQLite only" if args.sqlite_only else "SQLite + Chroma embeddings")
 
     from app.db import init_db
     from app.ingestion.service import ingest_jd
@@ -112,7 +113,7 @@ def main() -> int:
 
     print("\nImporting job descriptions…")
     n = 0
-    skip_chroma = not args.with_chroma
+    skip_chroma = bool(args.sqlite_only)
     for row in rows:
         text = (row.get("text") or "").strip()
         title = (row.get("title") or "Untitled").strip()
@@ -134,8 +135,6 @@ def main() -> int:
     print(f"\nDone. Imported {n} JDs.")
     print(f"SQLite jd_meta count: {collection_size()}")
     print(f"Company password (if accounts created): {PASSWORD}")
-    if skip_chroma:
-        print("Note: vectors not written (SQLite-only). Matching uses skill/ATS fallback.")
     return 0
 
 
