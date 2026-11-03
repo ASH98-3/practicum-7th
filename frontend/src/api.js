@@ -64,6 +64,12 @@ export const api = {
 
   matchResume: (formData) =>
     request('/api/candidate/match', { method: 'POST', body: formData, timeout: 180000 }),
+  apply: (matchId) =>
+    request('/api/candidate/apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ match_id: matchId }),
+    }),
   myMatches: () => request('/api/candidate/matches'),
 
   companyJds: () => request('/api/company/jds'),
@@ -74,6 +80,14 @@ export const api = {
       body: JSON.stringify(body),
       timeout: 120000,
     }),
+  setOpenings: (jdId, openings) =>
+    request(`/api/company/jds/${jdId}/openings`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ openings }),
+    }),
+  finalizeJd: (jdId) =>
+    request(`/api/company/jds/${jdId}/finalize`, { method: 'POST' }),
   deleteJd: (id) => request(`/api/company/jds/${id}`, { method: 'DELETE' }),
   applicants: () => request('/api/company/applicants'),
   setStatus: (id, body) =>
