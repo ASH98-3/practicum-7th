@@ -11,7 +11,15 @@ def _slug(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-") or "unknown"
 
 
-def ingest_jd(company: str, title: str, text: str, url: str = "", *, skip_chroma: bool = False) -> JDData:
+def ingest_jd(
+    company: str,
+    title: str,
+    text: str,
+    url: str = "",
+    *,
+    skip_chroma: bool = False,
+    openings: int = 1,
+) -> JDData:
     fields = extract_jd_fields(text)
     jd_id = hashlib.sha1(f"{company}|{title}|{url or text[:200]}".encode()).hexdigest()[:12]
     edu = fields["education"][0] if fields["education"] else "Not specified"
@@ -27,5 +35,5 @@ def ingest_jd(company: str, title: str, text: str, url: str = "", *, skip_chroma
         education_requirement=edu,
         parsed_summary=fields["summary"],
     )
-    register_jd(jd, skip_chroma=skip_chroma)
+    register_jd(jd, skip_chroma=skip_chroma, openings=max(1, int(openings or 1)))
     return jd
