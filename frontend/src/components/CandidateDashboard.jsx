@@ -2,17 +2,17 @@ import { useEffect, useState } from 'react'
 import { api } from '../api'
 
 const STATUS_LABEL = {
-  new: 'Awaiting company review',
+  new: 'Applied — awaiting review',
   shortlisted: 'Shortlisted',
   rejected: 'Not selected',
-  not_sent: 'Not sent (low fit or not shared)',
+  not_sent: 'Matched (not applied)',
 }
 
 export default function CandidateDashboard({ onMatched }) {
   const [file, setFile] = useState(null)
   const [text, setText] = useState('')
-  const [share, setShare] = useState(true)
   const [loading, setLoading] = useState(false)
+  const [applying, setApplying] = useState(null)
   const [msg, setMsg] = useState('')
   const [err, setErr] = useState(false)
   const [result, setResult] = useState(null)
@@ -39,7 +39,6 @@ export default function CandidateDashboard({ onMatched }) {
       const fd = new FormData()
       if (file) fd.append('file', file)
       fd.append('text', text)
-      fd.append('share', share)
       const data = await api.matchResume(fd)
       setResult(data)
       setMsg('')
@@ -53,17 +52,47 @@ export default function CandidateDashboard({ onMatched }) {
     }
   }
 
+  async function applyTo(matchId) {
+    setApplying(matchId)
+    setMsg('')
+    setErr(false)
+    try {
+      await api.apply(matchId)
+      setResult((prev) => {
+        if (!prev) return prev
+        return {
+          ...prev,
+          matches: (prev.matches || []).map((m) =>
+            m.match_id === matchId ? { ...m, status: 'new', applied: true } : m,
+          ),
+        }
+      })
+      await loadHistory()
+      setMsg('Application submitted — the company can now review you.')
+    } catch (e) {
+      setErr(true)
+      setMsg(e.message)
+    } finally {
+      setApplying(null)
+    }
+  }
+
   const decisionLabel = {
     shortlist: 'Strong fit found',
     manual_review: 'Partial fit',
     reject: 'No strong fit',
   }
 
+  const applications = history.filter((r) => r.status !== 'not_sent')
+
   return (
     <>
       <div className="hero">
         <h1>Find your best-fit companies</h1>
-        <p>Upload a resume. We extract skills, embed your profile, and rank live company JDs with ATS-style scoring.</p>
+        <p>
+          Upload a resume to rank live JDs. Then <strong>Apply</strong> to roles you want —
+          multiple candidates can apply to the same post; companies keep the top matches by openings.
+        </p>
       </div>
 
       <div className="grid-2">
@@ -82,12 +111,8 @@ export default function CandidateDashboard({ onMatched }) {
                 placeholder="Optional if you uploaded a file"
               />
             </div>
-            <label className="check">
-              <input type="checkbox" checked={share} onChange={(e) => setShare(e.target.checked)} />
-              <span>Share my profile with companies I match well (score 60+)</span>
-            </label>
             <button className="btn btn-primary" disabled={loading}>
-              {loading ? 'Matching…' : 'Find best-fit companies'}
+              {loading ? 'Matching…' : 'Find best-fit roles'}
             </button>
             {msg && <div className={`msg ${err ? 'error' : ''}`}>{msg}</div>}
           </form>
@@ -95,11 +120,12 @@ export default function CandidateDashboard({ onMatched }) {
 
         <div className="card">
           <h2>How it works</h2>
-          <p className="muted">1. Parse resume into skills, experience, education</p>
-          <p className="muted">2. Embed profile with a local sentence-transformers model</p>
-          <p className="muted">3. Retrieve similar JDs from the vector store</p>
-          <p className="muted">4. Re-score with ATS rubric + LLM skill equivalence</p>
-          <p className="muted">5. Route: shortlist · manual review · reject</p>
+          <p className="muted">1. Parse resume → skills, experience, education</p>
+          <p className="muted">2. Embed profile (sentence-transformers)</p>
+          <p className="muted">3. Retrieve similar JDs (vector search)</p>
+          <p className="muted">4. ATS score + optional LLM rationale</p>
+          <p className="muted">5. You choose which roles to <strong>Apply</strong> to</p>
+          <p className="muted">6. Company ranks applicants; top N = openings</p>
         </div>
       </div>
 
@@ -113,9 +139,7 @@ export default function CandidateDashboard({ onMatched }) {
           </div>
           <div className="chips">{(result.profile.skills || []).map((s) => <span className="chip" key={s}>{s}</span>)}</div>
           <p className="muted" style={{ marginTop: 12 }}>
-            {result.shared
-              ? 'Your profile was sent to companies scoring 60+. Track their response below.'
-              : 'Sharing is off: nothing was sent to companies.'}
+            Matching does not notify companies. Click <strong>Apply</strong> on each role you want.
           </p>
 
           {(result.matches || []).map((m, i) => (
@@ -128,6 +152,21 @@ export default function CandidateDashboard({ onMatched }) {
               <div style={{ textAlign: 'right' }}>
                 <div className="score">{m.ats_score}</div>
                 <div className="score-sub">ATS · sim {(m.similarity_score ?? 0).toFixed(2)}</div>
+                {m.applied || m.status === 'new' || m.status === 'shortlisted' || m.status === 'rejected' ? (
+                  <span className={`badge ${m.status || 'new'}`} style={{ marginTop: 8 }}>
+                    {STATUS_LABEL[m.status] || 'Applied'}
+                  </span>
+                ) : (
+                  <button
+                    className="btn btn-primary"
+                    style={{ marginTop: 10 }}
+                    disabled={applying === m.match_id}
+                    onClick={() => applyTo(m.match_id)}
+                    type="button"
+                  >
+                    {applying === m.match_id ? 'Applying…' : 'Apply'}
+                  </button>
+                )}
               </div>
             </div>
           ))}
@@ -135,9 +174,9 @@ export default function CandidateDashboard({ onMatched }) {
       )}
 
       <div className="card" style={{ marginTop: 16 }}>
-        <h2>Match history & status</h2>
-        {history.length === 0 ? (
-          <div className="empty">No matches yet — upload a resume above.</div>
+        <h2>My applications</h2>
+        {applications.length === 0 ? (
+          <div className="empty">No applications yet — match a resume and click Apply.</div>
         ) : (
           <table className="table">
             <thead>
@@ -148,7 +187,7 @@ export default function CandidateDashboard({ onMatched }) {
               </tr>
             </thead>
             <tbody>
-              {history.map((r) => (
+              {applications.map((r) => (
                 <tr key={r.id}>
                   <td>
                     <strong>{r.company}</strong>
