@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS matches(
   assessment_at TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS ix_match_company ON matches(company_id);
 CREATE INDEX IF NOT EXISTS ix_match_candidate ON matches(candidate_id);
+CREATE INDEX IF NOT EXISTS ix_match_jd ON matches(jd_id);
 CREATE TABLE IF NOT EXISTS jd_meta(
   jd_id TEXT PRIMARY KEY,
   company_id TEXT NOT NULL,
@@ -39,6 +40,7 @@ CREATE TABLE IF NOT EXISTS jd_meta(
   education_requirement TEXT DEFAULT '',
   parsed_summary TEXT DEFAULT '',
   raw_text TEXT DEFAULT '',
+  openings INTEGER DEFAULT 1,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS ix_jd_company ON jd_meta(company_id);
 """
@@ -60,12 +62,12 @@ def init_db():
     os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)), exist_ok=True)
     with conn() as c:
         c.executescript(SCHEMA)
-        # migrate older jd_meta without raw_text / extra columns
         cols = {r[1] for r in c.execute("PRAGMA table_info(jd_meta)").fetchall()}
         for col, decl in [
             ("education_requirement", "TEXT DEFAULT ''"),
             ("parsed_summary", "TEXT DEFAULT ''"),
             ("raw_text", "TEXT DEFAULT ''"),
+            ("openings", "INTEGER DEFAULT 1"),
         ]:
             if col not in cols:
                 c.execute(f"ALTER TABLE jd_meta ADD COLUMN {col} {decl}")
