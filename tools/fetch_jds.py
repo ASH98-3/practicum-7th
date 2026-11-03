@@ -4,22 +4,9 @@ Standalone job-description collector (NOT part of the live demo UI).
 Pulls public postings from Greenhouse / Lever job-board APIs, keeps only
 tech-relevant roles, and saves FULL job description text into JSON.
 
-Each saved object looks like:
-  {
-    "company": "Stripe",
-    "title": "Backend Engineer",
-    "url": "https://...",
-    "text": "<full plain-text job description — this is the actual JD>",
-    "text_chars": 4821,
-    ...
-  }
-
-The importer (tools/import_collected_jds.py) uses the "text" field as the JD body.
-
 Usage:
-    python tools/fetch_jds.py
-    python tools/fetch_jds.py --per-board 10 --out data/collected_jds.json
-    python tools/fetch_jds.py --only greenhouse
+    python tools/fetch_jds.py --out tools/data/collected_jds.json
+    python tools/fetch_jds.py --per-board 8 --out tools/data/collected_jds.json
 """
 from __future__ import annotations
 
@@ -51,6 +38,7 @@ except ImportError:
         with urlopen(req, timeout=25) as resp:
             return _json.loads(resp.read().decode("utf-8", errors="replace"))
 
+# Expanded board list for a richer company set
 DEFAULT_BOARDS = [
     ("greenhouse", "stripe"),
     ("greenhouse", "airbnb"),
@@ -61,9 +49,17 @@ DEFAULT_BOARDS = [
     ("greenhouse", "discord"),
     ("greenhouse", "notion"),
     ("greenhouse", "roblox"),
+    ("greenhouse", "coinbase"),
+    ("greenhouse", "shopify"),
+    ("greenhouse", "twilio"),
+    ("greenhouse", "dropbox"),
+    ("greenhouse", "reddit"),
+    ("greenhouse", "anthropic"),
     ("lever", "spotify"),
     ("lever", "netflix"),
     ("lever", "plaid"),
+    ("lever", "box"),
+    ("lever", "atlassian"),
 ]
 
 TECH_TITLE_KEYWORDS = [
@@ -117,9 +113,7 @@ def is_tech_role(title: str, text: str = "") -> bool:
 
 
 def _strip_html(raw: str) -> str:
-    """Turn API HTML (sometimes double-escaped) into plain JD text."""
     text = raw or ""
-    # Greenhouse often returns <p>...</p> — unescape until stable.
     for _ in range(3):
         un = html.unescape(text)
         if un == text:
@@ -145,14 +139,14 @@ def _pack(company: str, title: str, url: str, text: str, source: str, board: str
         "company": company,
         "title": title or "Untitled",
         "url": url or "",
-        "text": text,  # FULL job description body used by the app
+        "text": text,
         "text_chars": len(text),
+        "openings": 2,
         "external_id": external_id,
     }
 
 
 def _greenhouse_job_content(board: str, job_id: object) -> str:
-    """Fallback: fetch a single job when the list payload has empty content."""
     try:
         data = _get_json(
             f"https://boards-api.greenhouse.io/v1/boards/{board}/jobs/{job_id}?questions=false"
@@ -201,7 +195,6 @@ def lever_jobs(board: str, fetch_n: int) -> Iterator[dict]:
             if not isinstance(lst, dict):
                 continue
             text += f"\n{lst.get('text', '')}\n{_strip_html(lst.get('content', ''))}"
-        # Lever categories sometimes hold extra structured sections
         for cat in p.get("categories") or []:
             if isinstance(cat, str):
                 text += f"\n{cat}"
@@ -240,16 +233,20 @@ def load_existing(path: Path) -> Dict[str, dict]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Collect tech JDs (full text) into a JSON file")
-    ap.add_argument("--out", default="data/collected_jds.json", help="Output JSON path")
-    ap.add_argument("--per-board", type=int, default=12, help="Max tech jobs to keep per board")
-    ap.add_argument("--fetch-pool", type=int, default=60,
+    ap.add_argument("--out", default="tools/data/collected_jds.json", help="Output JSON path")
+    ap.add_argument("--per-board", type=int, default=8, help="Max tech jobs to keep per board")
+    ap.add_argument("--fetch-pool", type=int, default=50,
                     help="How many raw postings to pull per board before filtering")
     ap.add_argument("--only", choices=list(SOURCES), help="Only one source type")
-    ap.add_argument("--delay", type=float, default=0.4, help="Seconds between boards")
+    ap.add_argument("--delay", type=float, default=0.35, help="Seconds between boards")
     ap.add_argument("--no-filter", action="store_true", help="Disable tech-role filter")
     args = ap.parse_args()
 
     out_path = Path(args.out)
+    if not out_path.is_absolute():
+        # resolve relative to repo root when possible
+        root = Path(__file__).resolve().parent.parent
+        out_path = (root / out_path).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     by_id = load_existing(out_path)
 
@@ -290,26 +287,24 @@ def main() -> int:
         if dropped:
             print(f"  cleaned {dropped} non-tech / empty-body rows from existing file")
 
-    # Ensure text_chars is present for quick inspection in editors
     for r in rows:
         r["text_chars"] = len((r.get("text") or "").strip())
+        r.setdefault("openings", 2)
 
     out_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
 
     if rows:
+        companies = sorted({r.get("company") for r in rows})
         avg = sum(r["text_chars"] for r in rows) // len(rows)
-        sample = rows[0]
-        print(f"\nSaved {len(rows)} jobs → {out_path}  (+{added} new)")
+        print(f"\nSaved {len(rows)} jobs from {len(companies)} companies → {out_path}  (+{added} new)")
+        print(f"Companies: {', '.join(companies)}")
         print(f"Average JD length: {avg} characters")
-        print(f"Sample: {sample.get('company')} — {sample.get('title')} ({sample.get('text_chars')} chars)")
-        print(f"  text starts: {str(sample.get('text', ''))[:160]!r}...")
     else:
         print(f"\nSaved 0 jobs → {out_path}")
 
     if failed:
         print(f"Skipped boards: {', '.join(failed)}")
-    print("\nRemember: the full JD is in each object's \"text\" field (not only title/url).")
-    print("Import with:  python tools/import_collected_jds.py")
+    print("Import with:  python tools/load_scraped_jds.py")
     return 0
 
 
