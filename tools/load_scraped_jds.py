@@ -1,10 +1,8 @@
 """
-Load scraped JDs into SQLite + Chroma (real embeddings when model is available).
-
-Run inside the project venv:
+Load scraped JDs into SQLite + NumPy vectors (real embeddings in project venv).
 
     python tools/load_scraped_jds.py
-    python tools/load_scraped_jds.py --sqlite-only   # emergency: no vectors
+    python tools/load_scraped_jds.py --sqlite-only
 """
 from __future__ import annotations
 
@@ -77,25 +75,20 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--min-chars", type=int, default=200)
     ap.add_argument("--skip-accounts", action="store_true")
-    ap.add_argument(
-        "--sqlite-only",
-        action="store_true",
-        help="Skip Chroma/embeddings (emergency only; retrieval will be weak)",
-    )
+    ap.add_argument("--sqlite-only", action="store_true")
+    ap.add_argument("--default-openings", type=int, default=2)
     args = ap.parse_args()
 
     print("Repo root:", ROOT)
     print("Python:", sys.executable)
     path = find_json(args.file)
     print("Using JSON:", path)
-    print("File size:", path.stat().st_size, "bytes")
 
     rows = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(rows, list) or not rows:
         print("ERROR: JSON is empty or not a list")
         return 1
     print("Jobs in file:", len(rows))
-    print("Mode:", "SQLite only" if args.sqlite_only else "SQLite + Chroma embeddings")
 
     from app.db import init_db
     from app.ingestion.service import ingest_jd
@@ -119,10 +112,15 @@ def main() -> int:
         title = (row.get("title") or "Untitled").strip()
         company = (row.get("company") or row.get("board") or "Unknown").strip()
         url = row.get("url") or ""
+        openings = int(row.get("openings") or args.default_openings or 2)
         if len(text) < args.min_chars:
             continue
         try:
-            ingest_jd(company, title, text, url, skip_chroma=skip_chroma)
+            ingest_jd(
+                company, title, text, url,
+                skip_chroma=skip_chroma,
+                openings=openings,
+            )
         except Exception as e:
             print(f"  ! fail {company} — {title[:50]}: {e}")
             continue
