@@ -1,9 +1,4 @@
-"""JD metadata in SQLite; vectors on disk as NumPy (Windows-friendly RAG).
-
-Chroma's hnswlib often requires MSVC build tools on Windows. This store keeps
-the same API but uses cosine search over a .npy matrix so install and runtime
-stay reliable while still using real sentence-transformers embeddings.
-"""
+"""JD metadata in SQLite; vectors on disk as NumPy (Windows-friendly RAG)."""
 from __future__ import annotations
 
 import json
@@ -23,9 +18,8 @@ _VEC_DIR = Path(CHROMA_PERSIST_DIR).parent / "np_vectors"
 _IDS_PATH = _VEC_DIR / "ids.json"
 _MAT_PATH = _VEC_DIR / "matrix.npy"
 
-# in-memory cache
 _ids: List[str] = []
-_matrix: Optional[np.ndarray] = None  # shape (n, dim), L2-normalized rows
+_matrix: Optional[np.ndarray] = None
 _loaded = False
 
 
@@ -75,25 +69,28 @@ def _text(jd: JDData) -> str:
     return build_embedding_text(jd.title, jd.required_skills, jd.raw_text)
 
 
-def _upsert_sqlite(jd: JDData) -> None:
+def _upsert_sqlite(jd: JDData, openings: int = 1) -> None:
     skills = ",".join(jd.required_skills or [])
+    openings = max(1, int(openings or 1))
     with conn() as c:
         c.execute(
             "INSERT INTO jd_meta(jd_id,company_id,company,title,url,required_skills,"
-            "min_experience_years,education_requirement,parsed_summary,raw_text) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?) "
+            "min_experience_years,education_requirement,parsed_summary,raw_text,openings) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(jd_id) DO UPDATE SET "
             "company_id=excluded.company_id, company=excluded.company, title=excluded.title, "
             "url=excluded.url, required_skills=excluded.required_skills, "
             "min_experience_years=excluded.min_experience_years, "
             "education_requirement=excluded.education_requirement, "
-            "parsed_summary=excluded.parsed_summary, raw_text=excluded.raw_text",
+            "parsed_summary=excluded.parsed_summary, raw_text=excluded.raw_text, "
+            "openings=excluded.openings",
             (
                 jd.jd_id, jd.company_id, jd.company, jd.title, jd.url or "", skills,
                 int(jd.min_experience_years or 0),
                 jd.education_requirement or "",
                 jd.parsed_summary or "",
                 jd.raw_text or "",
+                openings,
             ),
         )
 
@@ -118,9 +115,8 @@ def _upsert_vector(jd_id: str, embedding: List[float]) -> None:
     _save_vectors()
 
 
-def register_jd(jd: JDData, *, skip_chroma: bool = False) -> None:
-    """skip_chroma kept for API compat; means skip vector write."""
-    _upsert_sqlite(jd)
+def register_jd(jd: JDData, *, skip_chroma: bool = False, openings: int = 1) -> None:
+    _upsert_sqlite(jd, openings=openings)
     if skip_chroma:
         return
     with _lock:
@@ -128,17 +124,33 @@ def register_jd(jd: JDData, *, skip_chroma: bool = False) -> None:
         _upsert_vector(jd.jd_id, emb)
 
 
-def register_jds_bulk(jds: List[JDData], *, skip_chroma: bool = False) -> None:
+def register_jds_bulk(jds: List[JDData], *, skip_chroma: bool = False, openings: int = 1) -> None:
     if not jds:
         return
     for jd in jds:
-        _upsert_sqlite(jd)
+        _upsert_sqlite(jd, openings=openings)
     if skip_chroma:
         return
     with _lock:
         embs = embed_batch([_text(j) for j in jds])
         for jd, emb in zip(jds, embs):
             _upsert_vector(jd.jd_id, emb)
+
+
+def set_openings(jd_id: str, openings: int) -> None:
+    with conn() as c:
+        c.execute(
+            "UPDATE jd_meta SET openings=? WHERE jd_id=?",
+            (max(1, int(openings or 1)), jd_id),
+        )
+
+
+def get_openings(jd_id: str) -> int:
+    with conn() as c:
+        r = c.execute("SELECT openings FROM jd_meta WHERE jd_id=?", (jd_id,)).fetchone()
+    if not r:
+        return 1
+    return max(1, int(r["openings"] or 1))
 
 
 def get_jd_by_id(jd_id: str) -> Optional[JDData]:
@@ -165,14 +177,15 @@ def list_jds(company_id: Optional[str] = None) -> List[dict]:
     with conn() as c:
         if company_id:
             rows = c.execute(
-                "SELECT jd_id, company_id, company, title, url, required_skills, min_experience_years "
-                "FROM jd_meta WHERE company_id=? ORDER BY company, title",
+                "SELECT jd_id, company_id, company, title, url, required_skills, "
+                "min_experience_years, openings FROM jd_meta WHERE company_id=? "
+                "ORDER BY company, title",
                 (company_id,),
             ).fetchall()
         else:
             rows = c.execute(
-                "SELECT jd_id, company_id, company, title, url, required_skills, min_experience_years "
-                "FROM jd_meta ORDER BY company, title"
+                "SELECT jd_id, company_id, company, title, url, required_skills, "
+                "min_experience_years, openings FROM jd_meta ORDER BY company, title"
             ).fetchall()
     out = []
     for r in rows:
@@ -185,6 +198,7 @@ def list_jds(company_id: Optional[str] = None) -> List[dict]:
             "url": r["url"] or "",
             "required_skills": [s for s in str(skills).split(",") if s],
             "min_experience_years": int(r["min_experience_years"] or 0),
+            "openings": max(1, int(r["openings"] or 1)),
         })
     return out
 
@@ -208,11 +222,9 @@ def query_top_jds(resume_embedding: List[float], top_k: int) -> List[MatchScore]
     with _lock:
         _load_vectors()
         if not _ids or _matrix is None or _matrix.size == 0:
-            # no vectors yet — return empty so caller can show a clear error
             return []
 
         q = _normalize(np.asarray(resume_embedding, dtype=np.float32))
-        # cosine sim = dot product for L2-normalized vectors
         sims = _matrix @ q
         k = min(top_k, len(_ids))
         top_idx = np.argsort(-sims)[:k]
